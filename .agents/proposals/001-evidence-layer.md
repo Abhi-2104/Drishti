@@ -1,167 +1,198 @@
-# Proposal — Evidence Layer v2 (Task 001)
+# Proposal — Evidence Layer v3 (Task 001)
 
-**Author:** Claude · **Status:** revised after Codex review · **Company:** INFY
+**Author:** Claude · **Status:** revised after Codex round 2; **escalated to human** · **Company:** INFY
 
-v1 is in git history. This v2 responds to `../reviews/001-evidence-layer.md`.
-
----
-
-## Review response (disposition of every finding)
-
-| Codex finding | Disposition | Addressed by (this doc) |
-|---|---|---|
-| C1 `document_date` conflates period vs availability | **Accept** | Split into `period_date` (descriptive, never a key) + `available_at` (the only point-in-time key) |
-| C2 `retrieved_at` ≠ availability; no tz | **Accept** | `available_at` = source's own publication timestamp, tz-aware; `retrieved_at` is audit-only; naive datetimes rejected |
-| C3 one `source_id` contradicts multi-source inference | **Accept** | FACT/CLAIM → exactly one `source_id`; INFERENCE → no source, `derived_from` ≥1 |
-| C4 excerpt may not support statement | **Accept concern; scope the fix** | FACT/CLAIM must be **extractive** (token/number-overlap checked); all paraphrase/causality forced into INFERENCE. Full entailment not mechanized — residual gated at review time (stated honestly) |
-| H5 URL ≠ reproducible provenance | **Accept** | Store raw captured payload + `content_sha256`; fixtures ARE the raw payloads; stale source → hash-mismatch test |
-| H6 `derived_from` unchecked | **Accept (enforceable subset)** | `validate()`: exists, no self, DAG, parent `available_at` ≤ child, same-entity. Relevance = residual |
-| H7 same evidence supports contradictory claims | **Accept** | Evidence can't be in both lists of one claim; FACT must be self-contained (comparison basis in the statement), interpretation → INFERENCE |
-| H8 destructive dedupe | **Accept; redesign** | No collapsing. `disclosure_group_id` (NSE+BSE copies = one independent signal) + `supersedes` (corrections retain both) |
-| H9 no partial success | **Accept** | Add `PARTIAL` status carrying valid evidence + failure detail |
-| H10 failure disappears at query | **Accept** | `query()` returns `{evidence, outcomes}`; outcomes for the scope are mandatory — a consumer can't get `[]` without seeing failures |
-| H11 `NO_DATA` ambiguous | **Accept (partial)** | `NO_DATA` requires a *validated* empty (structure valid + request echo matches); else `PARSE_FAILED`. Wrong-scrip test. Residual: silent upstream change needs a canary (future) |
-| M12 no document location | **Accept** | `locator` on Evidence (page/section/char-range) |
-| M13 role/authority not encoded; publisher free text | **Accept** | `publisher` + `document_class` become enums encoding authority |
-| M14 `confidence` unsupported | **Accept** | **Removed from v1.** Claim stays (criteria 7/8); confidence returns later when computable |
-| M15 one adapter per type too coarse | **Accept** | Adapters keyed by (source_type × format) |
-| M16 test plan omits false-confidence cases | **Accept** | Test plan expanded to exactly that list |
-| M17 round-trip ≠ validation | **Accept** | Standalone `validate()` invariant-checker, separate from serialization |
-
-**Scope-honesty note (the one place I push back on framing, not substance):** C4 and part of H6 demand proof that an excerpt *semantically supports* a statement and that derived evidence is *relevant*. Full natural-language entailment is AI-complete and will not be "solved" inside a dataclass layer — claiming otherwise would be the exact dishonesty this task exists to prevent. v2 instead **removes the pathway from the checkable tier** (FACT/CLAIM must be extractive; anything interpretive is INFERENCE with parents) and adds a mechanical token-overlap gate that catches gross drift. The residual semantic check is an explicit review gate at deep-dive time, named as a known limit — not pretended away.
-
-**Ponytail scope discipline:** v2 adds fields, enums, and one `validate()` function — cheap. It does **not** build auto-correction-detection, auto-disclosure-grouping, or a canary system now; the *structure* to represent supersession/grouping/partial exists and is validated, but auto-population stays thin for one company (INFY). Structure prevents misrepresentation; extraction sophistication grows in later tasks.
+v1/v2 are in git history. This v3 responds to `../reviews/001-evidence-layer-round2.md`.
+Per the max-3-cycles rule, this is the final agent cycle; the boundary decision at the end
+is the human's.
 
 ---
 
-## OBJECTIVE
+## Round-2 response (disposition)
 
-Unchanged from v1: a normalized, provenance-complete evidence store for one company that downstream research reasons over. v2 makes provenance and point-in-time integrity **enforced by `validate()` and tests**, not merely represented by populated fields.
+**Two blockers — accepted, fixed structurally:**
+- **Unknown availability:** `available_at` is now `Optional[datetime]`, and is `None` **iff**
+  `avail_provenance == UNKNOWN`. UNKNOWN sources are excluded from every point-in-time query by
+  construction. No invented timestamps.
+- **Inference availability:** `Evidence.recorded_at` (tz-aware) is added, **required for
+  INFERENCE**. An inference's effective availability *is* its `recorded_at`, and `validate()`
+  requires `recorded_at ≥ max(parent.available_at)`. The DAG rule is now implementable.
+
+**The mechanical win that closes H5 / M12 / new-5 together — excerpt bound to raw:**
+- `locator` becomes structured: `(unit, char_start, char_end)` into the **canonical text** of
+  `raw_ref`. `validate()` asserts `canonical_text(raw_ref)[char_start:char_end] == excerpt`.
+  The excerpt is now provably extractable from the exact hashed bytes at the stated offsets. A
+  swapped payload changes the hash; a fabricated excerpt/locator fails the substring check.
+
+**C4 / new-4 (negation, direction, unit, period) — strengthened, not hand-waved:**
+- A FACT/CLAIM `statement` must be a **normalized quotation of a contiguous span of the
+  excerpt** — verbatim, or a numeric/date normalization of tokens *present in that span* only.
+  `validate()` checks the statement reconstructs from the span. "Management expects improvement"
+  cannot be a FACT/CLAIM over a span that says "do **not** expect improvement" — the negation is
+  in the span and not in the statement, so it fails. Direction/unit/period flips fail the same
+  way. **Interpretation, comparison, and causality are not FACT/CLAIM — they are INFERENCE**
+  (labeled, sourced by `derived_from`, review-gated).
+
+**Accepted + fixed (cheap, correct):** outcome `request` descriptor + `response_meta` (H10/H11/#8);
+`MANAGEMENT_CLAIM` gains `speaker`+`speaker_role`, validated `MANAGEMENT` (M13/transcript hole);
+`publisher × document_class` compatibility matrix (M13/#10); `supersedes` DAG + fork validation
+(#6); ISIN as canonical identity + adapter normalization (#9); `PARTIAL` completeness denominator
+(H9); news adapter added (M15); expanded tests (M16).
+
+**Held as permanent residual — review-gated, NOT blockers (this is the escalation):**
+No schema decides these; naming them honestly is the correct engineering, and treating them as
+blockers means never shipping:
+1. Whether an INFERENCE's reasoning is *relevant and true* (`derived_from` is structurally
+   validated — exists, DAG, same-entity, temporally valid; topical relevance + logical soundness
+   are a review gate).
+2. Whether a `disclosure_group` assignment is *correct* (grouped sources are validated to share
+   ISIN + period; correctness of "same underlying disclosure" is review). **Therefore v1 does no
+   independence/corroboration counting at all** — confidence is already dropped, so the miscount
+   danger (#7) cannot materialize in v1.
+3. Whether a chosen authority class *matches the real-world artifact* beyond enum-compatibility
+   (raw is captured, hashed, and locator-bound so a human can audit; automated truth = no).
+4. `INFERRED_EOD` safety depends on the date being a *publication* date — so the adapter must
+   assert `date_kind == PUBLICATION`; a board/period date may **not** be used for EOD inference
+   (new-3). Where only a non-publication date exists → `UNKNOWN`, excluded from PIT.
 
 ---
 
-## DATA MODEL (v2)
+## DATA MODEL (v3 — final)
 
-Enums (controlled vocab):
 ```
 SourceType      = FILING | TRANSCRIPT | FUNDAMENTALS | RATING | QUOTE | NEWS
 DocumentClass   = EXCHANGE_FILING | EARNINGS_RELEASE | TRANSCRIPT | INVESTOR_PRESENTATION
-                | RATING_ACTION | ANNUAL_REPORT | QUOTE | MEDIA     # encodes authority
+                | RATING_ACTION | ANNUAL_REPORT | QUOTE | MEDIA
 Publisher       = NSE | BSE | SCREENER | CRISIL | ICRA | CARE | SEBI | MEDIA
 AvailProvenance = EXACT | INFERRED_EOD | UNKNOWN
+SpeakerRole     = MANAGEMENT | ANALYST | OPERATOR | OTHER
 EvidenceType    = FACT | MANAGEMENT_CLAIM | INFERENCE
 RetrievalStatus = OK | PARTIAL | NO_DATA | FETCH_FAILED | PARSE_FAILED
-```
 
-```
 Source
   id
-  entity                 # ISIN preferred, else ticker — the store is single-entity
+  isin                    # CANONICAL entity identity (INFY = INE009A01021); required
+  ticker                  # display only, never an identity key
   url
-  publisher              # Publisher enum
-  source_type            # SourceType
-  document_class         # DocumentClass (authority tier)
-  period_date            # date | None   — WHAT the content is about (qtr-end). Descriptive.
-                         #                 NEVER used as a point-in-time key.
-  available_at           # datetime, tz-aware (UTC) — WHEN it became public. The ONLY PIT key.
-  avail_provenance       # EXACT (source's own timestamp) | INFERRED_EOD (only a date known ->
-                         #   end-of-day IST, conservative) | UNKNOWN (excluded from PIT queries)
-  retrieved_at           # datetime, tz-aware — when WE fetched. Audit only, never a PIT key.
-  content_sha256         # hash of the raw captured payload (immutable identity)
-  raw_ref                # pointer to the stored raw payload (fixture path / blob id)
-  supersedes             # source_id | None   — a corrective filing points at the original
-  disclosure_group_id    # same underlying disclosure across venues (NSE+BSE) share this
+  publisher               # Publisher enum
+  document_class          # DocumentClass — must be compatible with publisher (matrix)
+  period_date             # date|None — WHAT it's about; descriptive; never a PIT key
+  available_at            # datetime tz-aware | None  (None iff avail_provenance==UNKNOWN)
+  avail_provenance        # EXACT | INFERRED_EOD (requires a PUBLICATION date) | UNKNOWN
+  retrieved_at            # datetime tz-aware — audit only
+  content_sha256          # hash of the raw captured payload
+  raw_ref                 # pointer to stored raw payload; canonical_text(raw_ref) is defined
+  supersedes              # source_id | None
+  disclosure_group_id     # descriptive; validated to share isin+period; no counting in v1
 
 Evidence
   id
-  evidence_type          # EvidenceType
-  source_id              # required iff FACT|MANAGEMENT_CLAIM ; None iff INFERENCE
-  derived_from           # [evidence_id] : non-empty iff INFERENCE ; empty otherwise
-  statement              # normalized one-line claim; FACT/CLAIM must be EXTRACTIVE + self-contained
-  excerpt                # verbatim span from the source backing `statement`
-  locator                # page/section/row/char-range within the source (audit trail)
-  as_of                  # date | None : the date the statement speaks to
+  evidence_type
+  source_id               # required iff FACT|MANAGEMENT_CLAIM ; None iff INFERENCE
+  derived_from            # [evidence_id] : non-empty iff INFERENCE ; empty otherwise
+  recorded_at             # datetime tz-aware : required iff INFERENCE (its effective availability)
+  statement               # FACT/CLAIM: normalized quotation of the excerpt span (validated)
+  excerpt                 # verbatim; == canonical_text(raw_ref)[locator.start:locator.end]
+  locator                 # (unit, char_start, char_end) into canonical_text(raw_ref)
+  speaker                 # str|None ; speaker_role required iff MANAGEMENT_CLAIM
+  speaker_role            # SpeakerRole|None ; must be MANAGEMENT for a MANAGEMENT_CLAIM
+  as_of                   # date|None : the date the statement speaks to (descriptive)
 
 Claim
-  id
-  statement
-  supporting             # [evidence_id]
-  contradicting          # [evidence_id]   (may be non-empty with supporting; disjoint from it)
-  # confidence REMOVED in v1
+  id ; statement ; supporting[] ; contradicting[]      # disjoint; no confidence in v1
 
 RetrievalOutcome
-  source_ref             # what was attempted (url / scrip / identifier)
-  status                 # RetrievalStatus
-  evidence               # [Evidence]  (present for OK and PARTIAL)
-  detail                 # why NO_DATA / what failed / which fraction parsed
+  request                 # {isin, source_type, document_class?, window_from, window_to,
+                          #  attempted_id, attempted_at}   — defines scope + not-attempted
+  status                  # RetrievalStatus
+  response_meta           # {structure_valid: bool, echo_matches: bool}
+  evidence                # [Evidence] for OK|PARTIAL
+  completeness            # {expected_units, parsed_units} | {"denominator": "unknown"} for PARTIAL
+  detail
 ```
 
 ## INVARIANTS enforced by `validate(store)`
 
-1. **IDs** unique; every `source_id` / `derived_from` / claim-link resolves (referential integrity).
-2. **Datetimes** all tz-aware; naive → invalid.
-3. **Point-in-time key discipline:** PIT queries filter on `available_at` only; records with `avail_provenance==UNKNOWN` excluded by default. `period_date` is never a filter key.
-4. **Source vs inference:** FACT/CLAIM → exactly one `source_id`, empty `derived_from`. INFERENCE → `source_id is None`, `derived_from` ≥1.
-5. **derived_from graph:** no self-reference, acyclic (DAG), every parent `available_at` ≤ child `available_at`, every parent same `entity`.
-6. **Extractive FACT/CLAIM:** numbers, dates, and named entities in `statement` must appear in `excerpt` (token/number overlap). Paraphrase/causality is not FACT/CLAIM — it must be INFERENCE.
-7. **Claim link sanity:** `supporting ∩ contradicting == ∅`; no duplicate IDs within a list.
-8. **Content identity:** re-hashing `raw_ref` equals `content_sha256` (stale/mutated source detected).
+1. Unique IDs; all references resolve (source_id, derived_from, claim links, supersedes).
+2. All datetimes tz-aware. PIT queries filter on `available_at` **only**; `avail_provenance==UNKNOWN`
+   (⇒ `available_at is None`) excluded. `period_date` and `as_of` are never filter keys. *(C1, blocker1)*
+3. FACT/CLAIM → exactly one `source_id`, empty `derived_from`, `recorded_at is None`.
+   INFERENCE → `source_id is None`, `derived_from` ≥1, `recorded_at` present. *(C3)*
+4. `derived_from` graph: no self, acyclic, every parent same `isin`, every parent
+   `available_at ≤ child.recorded_at`. *(blocker2, H6-structural)*
+5. Excerpt binding: `canonical_text(raw_ref)[locator.start:locator.end] == excerpt`. *(H5, M12, new5)*
+6. Extractive tier: FACT/CLAIM `statement` reconstructs as a normalized quotation of a contiguous
+   span of `excerpt` (numbers/dates normalized, nothing added/negated). *(C4, new4)*
+7. `MANAGEMENT_CLAIM` requires `speaker_role == MANAGEMENT`. *(M13, transcript-speaker)*
+8. `publisher × document_class` in the compatibility matrix (e.g. EXCHANGE_FILING ⇒ NSE|BSE;
+   publisher MEDIA ⇒ document_class MEDIA). *(M13, #10)*
+9. `supersedes`: same isin, same disclosure_group, `target.available_at < this.available_at`,
+   acyclic; exactly one non-superseded head per group else FORK error. *(#6)*
+10. `disclosure_group_id`: grouped sources share isin + period_date. (No counting in v1.) *(#7 bound)*
+11. Claim: `supporting ∩ contradicting == ∅`; no duplicate IDs in a list. *(H7-structural)*
+12. `content_sha256` == hash(raw_ref). *(H5)*
+13. `NO_DATA` requires `response_meta.structure_valid and response_meta.echo_matches`; else the
+    outcome must be `PARSE_FAILED`/`FETCH_FAILED`. *(H11)*
 
-## FLOW (v2)
+## FLOW
 
 ```
-raw captured payload (fixture = the stored raw + its hash)
-  -> adapter[(source_type, format)]  (pure)
-  -> RetrievalOutcome { OK|PARTIAL, [Evidence] }  |  { NO_DATA|FETCH_FAILED|PARSE_FAILED, detail }
-  -> EvidenceStore.add(outcome)        (records Sources, Evidence, AND non-OK outcomes)
-  -> validate(store)                   (all invariants above)
-  -> QueryResult = store.query(type=, as_of<=cutoff, ...) -> { evidence:[...], outcomes:[...] }
-                                        (outcomes for the scope are ALWAYS returned)
+raw captured payload (fixture = stored raw + sha256)
+  -> adapter[(source_type, format)]  (pure; normalizes isin; emits locator offsets)
+  -> RetrievalOutcome { OK|PARTIAL, [Evidence] } | { NO_DATA|FETCH_FAILED|PARSE_FAILED, response_meta }
+  -> EvidenceStore.add(outcome)          (records Sources, Evidence, AND every outcome w/ request)
+  -> validate(store)                     (invariants 1-13)
+  -> QueryResult = store.query(source_type, document_class?, as_of<=cutoff)
+        -> { evidence:[available_at<=cutoff, provenance!=UNKNOWN], outcomes:[scope-matched] }
+           # scope = request.isin+source_type+window overlapping the query; distinguishes
+           #         failed / unavailable-as-of / not-attempted
   -> Claim.link(supporting, contradicting)
-  -> (Task 003) /deep-dive reasons over QueryResult, and MUST surface outcomes + contradictions
+  -> (Task 003) /deep-dive reasons over QueryResult; MUST surface outcomes + contradictions + as-of gaps
 ```
 
-Adapters for INFY (per source_type × format): `bse_announcement_row`, `nse_filing_pdf`,
-`screener_section`, `concall_pdf`, `rating_snippet`, `quote_dict`.
+Adapters (source_type × format): `bse_announcement_row`, `nse_filing_pdf`, `screener_section`,
+`concall_pdf`, `rating_snippet`, `quote_dict`, **`news_item`**.
 
-## ASSUMPTIONS
+## TEST PLAN (v3)
 
-- Python 3.14 (>=3.12), stdlib only; sole dev dep `pytest`.
-- Live fetching stays in `nse-mcp` / `india_data_client.py`; this layer ingests their output. Fixtures are the captured raw payloads, so tests are offline + reproducible.
-- IST→UTC handled explicitly; `INFERRED_EOD` uses 23:59:59 IST for date-only sources (conservative).
-- One entity (INFY), JSON-on-filesystem store, no DB.
+Fixtures (real INFY raw + sha256): screener section, bse filing row, concall excerpt, quote,
+rating snippet, news item; failure fixtures: empty-but-valid, garbled non-JSON, wrong-scrip echo.
+Tests — each a concrete assertion:
+1. Each adapter → full provenance incl. isin, available_at, locator-bound excerpt.
+2. FACT/CLAIM single-source empty-derived; INFERENCE no-source ≥1-parent with recorded_at.
+3. `period_date=30-Jun, available_at=17-Jul` excluded from a 10-Jul PIT query.
+4. 16:30 IST filing excluded from a same-day 09:00 IST cutoff (tz-correct, not just tz-aware).
+5. INFERRED_EOD refused when the known date is a board/period (non-publication) date → UNKNOWN.
+6. empty-valid→NO_DATA; garbled→PARSE_FAILED; wrong-scrip echo→PARSE_FAILED.
+7. partial transcript → PARTIAL with expected/parsed denominator.
+8. query on a failed rating fetch → `{evidence:[], outcomes:[{status:FETCH_FAILED, request:{...rating window}}]}`;
+   not-attempted source distinguishable from failed.
+9. mutated raw → sha256 mismatch; fabricated locator/excerpt → invariant-5 failure.
+10. statement with dropped negation / flipped direction / wrong unit / wrong period → invariant-6 failure.
+11. MANAGEMENT_CLAIM on an ANALYST-role span → invariant-7 failure.
+12. incompatible publisher×document_class → invariant-8 failure.
+13. NSE+BSE copies grouped (share isin+period); correction supersedes original; two corrections of
+    one original → FORK error.
+14. inference self-ref / cycle / future-parent (parent.available_at > child.recorded_at) / cross-isin → fail.
+15. evidence in both claim lists → fail; serialize→deserialize→validate stable; naive datetime → fail.
 
-## FAILURE MODES still open after v2 (named, not hidden)
+## Definition of done — unchanged from v2
+The 12 task criteria, plus: an auditable `/deep-dive` must surface `outcomes` (failed/unavailable/
+not-attempted), show "unavailable as of <cutoff>", and surface contradictions rather than pick a side.
 
-- **Semantic entailment** (excerpt truly supports statement) — mechanized only as token-overlap; full check is a review gate. Residual.
-- **Relevance of derived_from** — structural checks pass; topical relevance is review-gated. Residual.
-- **Silent upstream API change** returning valid-looking empty — `NO_DATA` validation catches wrong-scrip/malformed, not a genuinely-changed-but-well-formed feed; needs a known-nonempty canary (future task).
-- **Auto-detection** of supersession/disclosure-grouping — structure exists; auto-population is later. v1 sets these when the adapter knows them, else leaves them null.
+---
 
-## TEST PLAN (v2)
+## HUMAN ESCALATION (the boundary decision is yours)
 
-Fixtures (real INFY raw payloads + hashes, checked in): Screener section, BSE filing row, concall excerpt, quote, rating snippet, news item; plus failure fixtures: empty-but-valid BSE response, garbled non-JSON, wrong-scrip echo.
+v3 mechanically closes both blockers and the "manually asserted vs mechanically connected" gap
+for: point-in-time integrity, excerpt↔raw binding, the extractive tier (incl. negation/unit/
+period), inference timing, outcome scope, supersession, and enum authority-compatibility.
 
-Tests — the false-confidence cases Codex named, each an assertion:
-1. Each (type×format) adapter → Source+Evidence with full provenance (criteria 1–6, 12).
-2. No Evidence without a Source for FACT/CLAIM; INFERENCE has no source but ≥1 `derived_from` (C3, criterion 10).
-3. `period_date=30-Jun` with `available_at=17-Jul` is **excluded** from a 10-Jul PIT query (C1).
-4. Same-day filing published 16:30 IST is excluded from a 09:00 IST same-day cutoff (C2).
-5. Empty-but-valid → `NO_DATA`; garbled → `PARSE_FAILED`; wrong-scrip echo → `PARSE_FAILED` not `NO_DATA` (H11, criterion 11).
-6. Partial transcript parse → `PARTIAL` with the valid excerpts + failure detail (H9).
-7. `query("latest rating")` on a failed rating fetch returns `{evidence:[], outcomes:[FETCH_FAILED]}` (H10).
-8. Mutated raw payload → `content_sha256` mismatch flagged (H5).
-9. NSE+BSE copies share `disclosure_group_id`; counted as one independent signal, both retained (H8).
-10. Corrective filing `supersedes` original; both retained; current-view picks the correction (H8).
-11. INFERENCE with self-ref / cycle / future-parent / cross-entity parent → `validate()` fails (H6).
-12. Evidence in both `supporting` and `contradicting` of one claim → `validate()` fails (H7).
-13. FACT whose numbers/entities are absent from `excerpt` → `validate()` fails (C4).
-14. Store serialize→deserialize→`validate()` still passes; naive datetime or dangling ref → fails (M17).
+What remains is **permanently not schema-decidable** and is by design a review gate, not a bug:
+inference relevance/truth, disclosure-group *correctness*, and authority-class-matches-artifact.
+An adversarial reviewer with no ship-constraint will keep surfacing this residual; that does not
+make it a blocker. Your call:
 
-## Definition of done (v2 addition)
-
-Beyond the 12 criteria: define what an auditable `/deep-dive` must display when the layer
-reports a gap — (a) surface the `outcomes` (a failed/`NO_DATA` source is shown, never silently
-omitted); (b) show "unavailable as of <cutoff>" for records not yet public; (c) surface
-contradictions rather than silently picking a side. This is the acceptance bar for the
-"can it back an auditable INFY deep-dive?" experiment.
+- **(A) Implement v3** — build it, with the residuals as named review gates. *(Claude's recommendation.)*
+- **(B) One more mechanization** — pick a specific residual to push further before coding.
+- **(C) Rescope** — decide any of the residuals is out of Task 001 entirely.
