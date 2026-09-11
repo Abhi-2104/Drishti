@@ -26,9 +26,20 @@ and why, and the current state. This file is the day-to-day operating rulebook.
   fine: ROCE (return on capital employed), OFS (offer for sale), FII (foreign institutional
   investor), DII (domestic institutional investor), PIT (prohibition of insider trading), GMP
   (grey-market premium), OCF (operating cash flow). Never leave an acronym cold.
-- **Tabulate all data.** Multi-year financials, flows, persona calls, entry/exit gate checks,
-  IPO particulars — tables, not walls of numbers in prose. One figure in a sentence is fine;
-  three or more related figures belong in a table.
+- **Tables only where they earn it.** A table is for data the reader scans *across* —
+  multi-year financial trends, peer comparison, the persona matrix, a gate checklist. For a
+  couple of figures or a single narrative point, write the sentence. Aim for at most one or two
+  tables in a response; prose is the default, tables are the exception for genuinely grid-shaped
+  data.
+- **No naked numbers.** Every figure carries its comparison — year-on-year (YoY), versus peers,
+  or versus its own history. "Operating margin 19%" is noise; "19%, down from 21% in FY24" is a
+  signal. A number without a reference point does not belong in the output.
+- **Flag confidence and gaps.** Tag a thin or single-source claim as low-confidence; when a
+  source was unavailable, say so plainly — a data gap is a stated gap, never quietly filled or
+  passed off as a finding. Solid must be distinguishable from shaky at a glance.
+- **Length discipline.** Keep it scannable — bold the one decisive number, short bullets over
+  dense paragraphs, and match depth to the trigger, not to available words. A tight answer that
+  lands beats a long one that buries.
 - **No fluff.** Don't restate the request, don't pad, don't hedge for length. Lead with the
   finding; every line earns its place. Frankness (directive 4) over politeness.
 
