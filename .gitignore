@@ -26,3 +26,7 @@ reference/NSE-MCP/
 # Local scratch
 scratchpad/
 *.log
+
+# Build scaffolding + test data — kept locally, not in the repo
+.agents/
+tests/
