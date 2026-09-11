@@ -75,6 +75,7 @@ stays with you.
 | Earnings-call transcripts | The transcript is read in full, not inferred from the numbers, to catch a genuine shift in management's tone on demand, margins, or guidance | Wherever the company files one |
 | Institutional flows | Net daily buying/selling by foreign and domestic institutions | Market-wide, see note below |
 | Credit ratings | Latest rating action from CRISIL / ICRA / CARE and peers | Rated companies |
+| IPOs (primary market) | Open and upcoming public issues with their particulars, and the prospectus (DRHP/RHP) read in full for `/ipo` | NSE public-issue feed + the offer document filed with SEBI/the exchanges |
 | News | A curated, tiered source list — not open-ended web search | Scoped to the watchlist |
 
 ### A note on institutional flows (FII/DII)
@@ -284,6 +285,29 @@ genuine break in the thesis, or as a periodic check on a logged position.
 **Example:**
 ```
 /exit SUNPHARMA
+```
+
+---
+
+### `/ipo <name>` — IPO application analysis
+**Cost: high. Scope: one public issue.**
+
+The primary-market cousin of `/deep-dive`: the same discipline applied to a company that
+isn't listed yet, so there's no price history — the analysis rests on the **prospectus**
+(the DRHP / RHP offer document), read in full. It covers what the company does, the issue
+(how much is fresh money for the company versus existing holders cashing out), what the
+money will be used for, the restated financials, the asking valuation against listed peers,
+whether promoters or private-equity backers are exiting into the issue, and the risk
+factors — ending in an **APPLY / SKIP / NEUTRAL** call with the single biggest risk named.
+
+Grey-market premium (GMP) is deliberately **not** used — it is unofficial, unregulated, and
+easily manipulated, the same category of noise the tool excludes everywhere else.
+
+**Run it when:** an IPO is open or upcoming and you're deciding whether to apply.
+
+**Example:**
+```
+/ipo <company name>
 ```
 
 ---
