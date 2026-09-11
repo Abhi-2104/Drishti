@@ -31,9 +31,12 @@ and why, and the current state. This file is the day-to-day operating rulebook.
   couple of figures or a single narrative point, write the sentence. Aim for at most one or two
   tables in a response; prose is the default, tables are the exception for genuinely grid-shaped
   data.
-- **No naked numbers.** Every figure carries its comparison — year-on-year (YoY), versus peers,
-  or versus its own history. "Operating margin 19%" is noise; "19%, down from 21% in FY24" is a
-  signal. A number without a reference point does not belong in the output.
+- **No naked *judgment* numbers.** A figure you're drawing a conclusion from — margin, growth,
+  return, valuation multiple — needs its comparison (year-on-year (YoY), versus peers, or versus
+  own history): "margin 19%, down from 21% in FY24" is a signal, "margin 19%" alone is noise.
+  Standalone *facts* — market cap, issue size, price band, lot size, stop level, a date, ISIN —
+  stand on their own; don't bolt on a pointless comparison. The test: if the number is there to
+  judge, give the reference point; if it's there to state a fact, just state it.
 - **Flag confidence and gaps.** Tag a thin or single-source claim as low-confidence; when a
   source was unavailable, say so plainly — a data gap is a stated gap, never quietly filled or
   passed off as a finding. Solid must be distinguishable from shaky at a glance.
