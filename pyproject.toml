@@ -1,0 +1,17 @@
+[project]
+name = "drishti-evidence"
+version = "0.1.0"
+description = "Drishti evidence layer — normalized, provenance-complete evidence store for one company's research."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Runtime baseline (recorded for reproducibility — see .agents/state/environment.md):
+#   Python 3.14.4, Node 24.18 (nse-mcp connector only).
+# The evidence-layer core is stdlib-only (dataclasses/enum/datetime/json);
+# the sole dev dependency is pytest, so fixture-based tests run offline.
