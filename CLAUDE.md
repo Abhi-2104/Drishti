@@ -17,6 +17,21 @@ and why, and the current state. This file is the day-to-day operating rulebook.
    soften a red flag.
 5. Cost discipline is a first-class constraint (below).
 
+## Output & response format (every command)
+- **Open with a plan line.** Before pulling data, 1-2 sentences on what you'll do and why —
+  plain but precise: light financial/technical terms are fine, kept simple; not layman, not
+  jargon-dense. E.g. "Pulling INFY's last 3 years of financials plus the latest earnings call
+  to check whether the margin recovery is real or just a weak-base effect."
+- **Expand abbreviations on first use** — full form in parentheses, then the short form is
+  fine: ROCE (return on capital employed), OFS (offer for sale), FII (foreign institutional
+  investor), DII (domestic institutional investor), PIT (prohibition of insider trading), GMP
+  (grey-market premium), OCF (operating cash flow). Never leave an acronym cold.
+- **Tabulate all data.** Multi-year financials, flows, persona calls, entry/exit gate checks,
+  IPO particulars — tables, not walls of numbers in prose. One figure in a sentence is fine;
+  three or more related figures belong in a table.
+- **No fluff.** Don't restate the request, don't pad, don't hedge for length. Lead with the
+  finding; every line earns its place. Frankness (directive 4) over politeness.
+
 ## Source hierarchy (highest trust first)
 1. Exchange disclosures via nse-mcp — FII/DII, insider (SEBI PIT), bulk/block deals,
    pledges, corporate actions, announcements.
