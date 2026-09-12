@@ -10,11 +10,25 @@ For handing the project to someone else (or setting up a fresh machine).
   needed to read concall and IPO-prospectus PDFs.
 
 ## Three steps
+
+**Linux / macOS / WSL:**
 ```bash
 git clone <the-repo-url> Drishti
 cd Drishti
 ./install.sh
 ```
+
+**Native Windows (PowerShell):**
+```powershell
+git clone <the-repo-url> Drishti
+cd Drishti
+.\install.ps1
+```
+Windows extras: install Node 20+ (`winget install OpenJS.NodeJS.LTS`), Git
+(`winget install Git.Git`), and — for PDF reading — poppler
+(`winget install oschwartz10612.Poppler`). If PowerShell blocks the script, run
+`Set-ExecutionPolicy -Scope Process RemoteSigned` first. (WSL is smoother if you have it —
+then use `install.sh` above.)
 
 `install.sh` does everything:
 - checks Node/git are present,
