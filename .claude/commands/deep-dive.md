@@ -3,6 +3,12 @@ description: Full research on ONE name (Loop 2)
 argument-hint: [TICKER]
 ---
 Deep research on $ARGUMENTS. Expensive loop — thorough, one name. Cite sources per section:
+
+US-LISTED name (e.g. AAPL, MSFT)? Use the US path instead of the India tools: get_us_quote
+(price/valuation), get_us_fundamentals (SEC EDGAR restated 10-K financials for §2), get_us_filings
+(§4 disclosure — 10-K/10-Q reports, 8-K events, Form 4 = insider trades, SC 13D/G = large stakes;
+Read a filing's document URL for detail). §3 concall = the earnings-call transcript (via the 8-K
+/ company IR). Same methodology, US sources. Everything below is the India path.
 1. WHAT IT DOES — business/segments/revenue mix (nse-mcp get_screener).
 2. FUNDAMENTALS — growth, margins, ROCE/ROE, debt, cash flow over 3+ yrs (trend not snapshot);
    valuation vs own history + peers. Use nse-mcp get_screener (resolves NSE symbol, BSE code, or

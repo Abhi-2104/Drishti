@@ -76,6 +76,8 @@ stays with you.
 | Institutional flows | Net daily buying/selling by foreign and domestic institutions | Market-wide, see note below |
 | Credit ratings | Latest rating action from CRISIL / ICRA / CARE and peers | Rated companies |
 | IPOs (primary market) | Open and upcoming public issues with their particulars, and the prospectus (DRHP/RHP) read in full for `/ipo` | NSE public-issue feed + the offer document filed with SEBI/the exchanges |
+| Market regime | Macro backdrop, derivatives smart-money positioning (participant open interest), sector rotation, cycle phase — for `/macro` and entry timing | Yahoo Finance (macro, sectors) + NSE participant-OI archive |
+| US equities | Live US quotes, restated annual financials, and filings (10-K/10-Q, 8-K, insider Form 4) for `/deep-dive` on US names | Yahoo Finance + SEC EDGAR |
 | News | A curated, tiered source list — not open-ended web search | Scoped to the watchlist |
 
 ### A note on institutional flows (FII/DII)
@@ -168,6 +170,26 @@ time to a specific name.
   ```
   /screen cement companies benefiting from the infrastructure capex cycle
   ```
+
+---
+
+### `/macro` — market regime read
+**Cost: moderate. Scope: the whole market, not one name.**
+
+The top-down context command. Pulls the macro backdrop (dollar index, US yields, crude, India
+VIX), the derivatives **smart-money positioning** (are foreign institutions and prop desks
+positioned with or against retail), and **sector rotation** (which sectors are leading or
+rotating in) — then places them on the economic cycle and the Indian seasonal calendar to give a
+**risk-on / neutral / risk-off** read. Use it to time entries: a name can pass on its own merits
+but still warrant waiting if the regime is hostile.
+
+**Run it when:** starting a session, or before committing capital, to know which way the tape
+leans and which sectors to favour.
+
+**Example:**
+```
+/macro
+```
 
 ---
 
