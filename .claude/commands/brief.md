@@ -3,8 +3,10 @@ description: Cheap daily monitoring digest across the watchlist (Loop 1)
 ---
 Run the MONITORING loop cheaply. No deep analysis here — scan, dedupe, escalate.
 1. Read config/watchlist.md + config/news-sources.md.
-2. Market context (one cheap sweep): get_market_status (open/closed) + get_nifty_indices for
-   index and sector tone; get_top_gainers / get_top_losers / get_most_active to catch which
+2. Market context (one cheap sweep): get_macro_regime (global backdrop + regime score),
+   get_participant_oi (smart-money score — are FII+Pro positioned with or against retail),
+   get_sector_rotation (which sectors are Leading / Improving), get_market_status (open/closed),
+   get_nifty_indices, and get_top_gainers / get_top_losers / get_most_active to catch which
    watchlist names moved or spiked on volume today.
 3. Watchlist flow + disclosure deltas via nse-mcp: get_insider_trading, get_bulk_deals,
    get_block_deals, get_corporate_actions, get_fii_dii_activity (market-level context only,

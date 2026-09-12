@@ -11,5 +11,8 @@ Apply the EXIT framework (CLAUDE.md) to $ARGUMENTS.
    shortcut for the deal/insider/announcement sweep.
 3. Test triggers: THESIS BREAK (downgrade/pledge rise/insider-sell cluster/guidance cut/
    order-book or margin deterioration), TARGET HIT, STOP HIT.
+   Context (not a trigger on its own): get_participant_oi + get_macro_regime — a sharp turn to
+   institutions-short/retail-long or a deteriorating regime raises the odds a break is coming;
+   tighten the watch, but price/regime alone is never the thesis break.
 Output: VERDICT (HOLD/TRIM/EXIT) + which trigger fired (source+date) or "no trigger — HOLD
 because...". Propose updated thesis line if it evolved. Price alone != thesis break. Not-advice line.
