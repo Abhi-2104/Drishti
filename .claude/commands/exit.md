@@ -4,6 +4,9 @@ argument-hint: [TICKER]
 ---
 Apply the EXIT framework (CLAUDE.md) to $ARGUMENTS.
 1. Read theses/<TICKER>.md — logged thesis, entry, stop, target, "what must stay true".
+   If Kite is connected (optional), cross-check against the ACTUAL holding — real average
+   entry, quantity, current P&L — read-only, to test stop/target against true cost basis.
+   No Kite? Use the logged entry. Never place or change an order.
 2. Pull current via nse-mcp: get_insider_trading (insider-sell cluster), get_short_selling
    (rising short interest = pressure), get_screener (shareholding) + get_bse_announcements
    (pledge rise / SAST / rating action), get_corporate_actions, latest concall/results &

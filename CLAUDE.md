@@ -54,7 +54,28 @@ and why, and the current state. This file is the day-to-day operating rulebook.
 4. Macro prints (RBI/MOSPI/GST/UPI/auto) — only when a thesis needs them.
 5. News whitelist (config/news-sources.md) — Tier 1 primary > Tier 2 media. NEVER
    open-ended web search for "buzz"; whitelist only.
-6. kite MCP (if connected) — user's own holdings/P&L only.
+6. kite MCP (if connected) — read-only portfolio context only (see below).
+
+## Portfolio context (Kite — optional, read-only)
+Kite (Zerodha) MCP, IF connected, provides READ-ONLY portfolio context: holdings,
+positions, average buy price, P&L, available margin. Use it to ground `/exit` (test
+triggers against what is actually held and its real entry) and `/entry` (size against
+real capital and existing exposure).
+HARD RULE — NEVER EXECUTE. Do not place, modify, or cancel any order. Do not call any
+order / trade / GTT / fund-transfer tool, even if the connected server exposes one. Do not
+move money. Drishti structures the decision; the user places every trade themselves in
+their broker. Trade execution is permanently out of scope.
+Kite is entirely OPTIONAL — if it is not connected, every command works normally without
+portfolio context. Never require it.
+
+## Optional configuration (all have defaults — never required)
+Read these if present; otherwise behave generically. None is required to run.
+- `config/watchlist.md` — names /brief and /screen scan (a starter set ships).
+- `config/news-sources.md` — the news whitelist (default tiers ship).
+- `config/investor-profile.md` — OPTIONAL private personalization (risk appetite, horizon,
+  max position size, deployable capital, sector prefs). If present, /entry sizes and /screen
+  filter to it and /panel/deep-dive weigh preferences; if absent, stay generic. It is
+  gitignored and private — never commit it, never echo its raw contents back verbatim.
 
 ## Cost discipline ("do it cheaply")
 - Two loops. MONITORING (/brief): cheap model, reads whitelist + flow deltas + watchlist,

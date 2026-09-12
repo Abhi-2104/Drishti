@@ -13,5 +13,8 @@ DISCLOSURE CHECK pulls: get_insider_trading (no insider-sell cluster), get_scree
 (shareholding) + get_bse_announcements (no rising pledge / SAST), get_short_selling (no spike
 in short interest against the entry), latest rating action. search_by_symbol is the one-call
 shortcut for the bulk/block/insider/announcement sweep.
+If Kite is connected (optional, read-only): size the RISK gate against real available margin
+and existing exposure, and flag if the name is already held. No Kite? Size generically. Never
+place the order — output the level/size for the user to act on themselves.
 Output: VERDICT (GO/WAIT/PASS) + ENTRY LEVEL/ZONE + STOP + suggested size + (if WAIT) what's
 missing and what flips it + THESIS TO LOG for theses/<TICKER>.md. Append not-advice line.

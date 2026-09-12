@@ -54,7 +54,29 @@ echo "==> Building drishti-mcp (our tools: Screener, BSE, IPOs, macro, participa
 ( cd drishti-mcp && npm install --silent && npm run build ) || { echo "  drishti-mcp build FAILED — fix before using."; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 4) Generate .mcp.json with THIS machine's paths
+# 4) Optional: Kite (Zerodha) — read-only portfolio context. NEVER trades. Off by default.
+# ---------------------------------------------------------------------------
+enable_kite="n"
+[ "${DRISHTI_KITE:-}" = "1" ] && enable_kite="y"
+if [ -t 0 ] && [ "$enable_kite" = "n" ]; then
+  read -rp "Enable Kite (Zerodha) read-only portfolio context? It NEVER places trades. [y/N] " ans || true
+  case "${ans:-}" in [Yy]*) enable_kite="y" ;; esac
+fi
+KITE_BLOCK=""
+if [ "$enable_kite" = "y" ]; then
+  KITE_BLOCK=',
+    "kite": {
+      "type": "url",
+      "url": "https://mcp.kite.trade/sse",
+      "_comment": "OPTIONAL, read-only portfolio context (holdings/positions/P&L). Drishti never places, changes, or cancels orders. Signs in on first use."
+    }'
+  echo "==> Kite enabled (read-only portfolio context)."
+else
+  echo "==> Kite skipped (enable later: re-run with DRISHTI_KITE=1 ./install.sh, or add the block to .mcp.json)."
+fi
+
+# ---------------------------------------------------------------------------
+# 5) Generate .mcp.json with THIS machine's paths
 # ---------------------------------------------------------------------------
 echo "==> Writing .mcp.json for $REPO"
 [ -f .mcp.json ] && cp .mcp.json .mcp.json.bak
@@ -70,22 +92,38 @@ cat > .mcp.json <<JSON
       "command": "node",
       "args": ["$REPO/reference/NSE-MCP/dist/index.js"],
       "_comment": "manitgupta/NSE-MCP (third-party clone). Base NSE tools: quotes, insider, bulk/block deals, FII/DII, announcements, corp actions, movers, indices, short-selling."
-    },
-    "kite": {
-      "type": "url",
-      "url": "https://mcp.kite.trade/sse",
-      "_comment": "OPTIONAL — Zerodha Kite MCP (your own holdings). Needs your Zerodha login on first use. Remove if unused."
-    }
+    }$KITE_BLOCK
   }
 }
 JSON
 
+# ---------------------------------------------------------------------------
+# 6) Optional: private investor profile (personalizes sizing/preferences). Off by default.
+# ---------------------------------------------------------------------------
+if [ ! -f config/investor-profile.md ] && [ -f config/investor-profile.example.md ]; then
+  make_profile="n"
+  [ "${DRISHTI_PROFILE:-}" = "1" ] && make_profile="y"
+  if [ -t 0 ] && [ "$make_profile" = "n" ]; then
+    read -rp "Create a private investor profile (optional; shapes /entry sizing + sector prefs)? [y/N] " ans || true
+    case "${ans:-}" in [Yy]*) make_profile="y" ;; esac
+  fi
+  if [ "$make_profile" = "y" ]; then
+    cp config/investor-profile.example.md config/investor-profile.md
+    echo "==> Created config/investor-profile.md (private, gitignored) — edit it to taste."
+  fi
+fi
+
 echo ""
-echo "==> Done."
-echo "   1) (once)  sudo apt-get install -y poppler-utils     # if not already, for PDF reading"
-echo "   2) Edit    config/watchlist.md with your names."
-echo "   3) Open this folder in Claude Code."
-echo "   4) It reads CLAUDE.md automatically; for full context tell it: 'read MASTER.md'."
-echo "   5) Try:    /macro     then    /deep-dive <NAME>"
+echo "==> Done. Everything below is OPTIONAL — Drishti works out of the box with defaults."
 echo ""
-echo "   Kite (your Zerodha holdings) is optional — it authenticates in-app on first use."
+echo "   System:"
+echo "     - (once) sudo apt-get install -y poppler-utils   # for reading concall/prospectus PDFs"
+echo ""
+echo "   Optional config (all have working defaults; edit only what you want):"
+echo "     - config/watchlist.md          names /brief and /screen scan (a starter set is included)"
+echo "     - config/news-sources.md       the news whitelist (sensible tiers included)"
+echo "     - config/investor-profile.md   private sizing/prefs (opt-in above; generic if absent)"
+echo "     - Kite (Zerodha)               read-only portfolio context, never trades (opt-in above)"
+echo ""
+echo "   Then: open this folder in Claude Code (it reads CLAUDE.md automatically; say"
+echo "   'read MASTER.md' for full context), and try:   /macro    then   /deep-dive <NAME>"
