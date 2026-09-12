@@ -346,11 +346,13 @@ used occasionally rather than as part of the daily or per-name workflow.
 ## 6. The typical path from idea to decision
 
 ```
+/macro                    the tape: risk-on / neutral / risk-off, sectors leading
+      |
 /brief                    daily: what changed today
       |
 /screen <criteria>        optional: source new candidate names
       |
-/deep-dive <name>         the full file on one name
+/deep-dive <name>         the full file on one name        ( /ipo <name> for a public issue )
       |
 /panel  or  /bull-bear    stress-test the thesis from multiple angles
       |
@@ -365,21 +367,51 @@ watchlist at once.
 
 ---
 
-## 7. Planned: personal portfolio integration (Zerodha)
+## 7. Portfolio context (Zerodha Kite) — optional, read-only
 
-**Status: scoped, not yet connected.**
+**Status: available, opt-in.** If you connect Zerodha's Kite, the tool can read your own
+holdings, positions, average entry price, profit/loss, and available margin — and use them
+to ground two commands:
 
-A connection to Zerodha's Kite platform is planned so that the tool can read your own
-actual holdings and profit/loss — for your own positions only, never as a data source
-for researching other companies. Once connected, the intended scope is:
+- `/exit` tests its triggers against what you **actually** hold and your real cost basis,
+  instead of a logged note.
+- `/entry` sizes the risk gate against your **real** capital and existing exposure, and
+  flags a name you already own.
 
-- Seeing your actual holdings and their entry price alongside `/exit` checks, so the
-  exit discipline is checked against what you genuinely hold rather than a logged note.
-- Cross-referencing your own position sizes against the sizing that `/entry` recommends.
+**Read-only, and permanently so.** Drishti never places, changes, or cancels an order, and
+never moves money — even though the Kite connector technically can. It structures the
+decision; you place every trade yourself in your broker. Kite is entirely optional: if it
+isn't connected, every command works normally without portfolio context.
 
-This integration is **read-only by design** — it is for visibility into your own book,
-not for placing trades. No trade-execution capability is planned. This document will be
-updated once the connection is active and in daily use.
+---
+
+## 8. Optional configuration — nothing is required
+
+Drishti runs out of the box with sensible defaults. Customize only what you want; each
+lives in a plain file the commands read if present:
+
+| File | What it controls | Default |
+|---|---|---|
+| `config/watchlist.md` | The names `/brief` and `/screen` scan | A starter watchlist ships |
+| `config/news-sources.md` | The tiered news whitelist | Sensible tiers ship |
+| `config/investor-profile.md` | Private personalization — risk appetite, horizon, max position size, deployable capital, sector preferences; shapes `/entry` sizing and `/screen` filtering | Absent → generic behaviour |
+
+The investor profile is **private and gitignored** — it is never committed, and the tool
+never echoes its raw contents back. Create it from `config/investor-profile.example.md`
+(the installer offers to do this for you).
+
+---
+
+## 9. Setup and architecture
+
+**Setup** is one script — see [SETUP.md](SETUP.md): clone, run `./install.sh` (it checks
+prerequisites, builds the tools, and writes the connection config for your machine), then
+open the folder in Claude Code. No API keys are needed — the data sources are public.
+
+**Under the hood**, the tools are provided by two Model Context Protocol (MCP) servers:
+`drishti-mcp` (this project's own — fundamentals, BSE filings, IPOs, macro regime, participant
+open interest, sector rotation, US filings) and `nse-mcp` (a third-party connector for base
+NSE market data). You don't interact with these directly — the commands do.
 
 ---
 
