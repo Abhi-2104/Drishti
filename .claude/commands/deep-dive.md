@@ -14,7 +14,9 @@ Deep research on $ARGUMENTS. Expensive loop — thorough, one name. Cite sources
    skim priors for the shift. Don't guess §3 from numbers anymore — read the actual transcripts.
 4. FLOWS & DISCLOSURE — FII/DII trend, insider trades, bulk/block, pledge trend, corporate
    actions. Insider trades/bulk-block/corp-actions: nse-mcp (get_insider_trading, get_bulk_deals,
-   get_corporate_actions) — NSE-only, always call regardless of listing.
+   get_block_deals, get_corporate_actions, get_short_selling — rising short interest is a bearish
+   signal) — NSE-only, always call regardless of listing. search_by_symbol is the one-call
+   shortcut returning bulk + block + insider + announcements together.
    Promoter-HOLDING trend (stake sell-down signal): get_screener.shareholding (NSE AND BSE) —
    note this is holding %, NOT pledge.
    FILINGS FEED — call get_nse_announcements AND get_bse_announcements for EVERY name, not
