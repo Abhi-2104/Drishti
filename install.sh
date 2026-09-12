@@ -31,6 +31,12 @@ if [ -d reference/NSE-MCP ]; then
   ( cd reference/NSE-MCP && npm install && npm run build ) || echo "  (build NSE-MCP manually; see its README)"
 fi
 
+# 3b) Build drishti-mcp — OUR server (in-repo, committed; dist/ is gitignored so build it)
+if [ -d drishti-mcp ]; then
+  echo "==> Building drishti-mcp"
+  ( cd drishti-mcp && npm install && npm run build ) || echo "  (build drishti-mcp manually: cd drishti-mcp && npm install && npm run build)"
+fi
+
 echo ""
 echo "==> Done. Next:"
 echo "   1) Edit config/watchlist.md with your names."

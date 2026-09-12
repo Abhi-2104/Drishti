@@ -1,0 +1,24 @@
+{
+  "name": "drishti-mcp",
+  "version": "0.1.0",
+  "description": "Drishti's own MCP server — Indian + US equity research tools (Screener, BSE filings, IPOs, macro regime, participant OI, sector rotation, SEC EDGAR).",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": { "drishti-mcp": "dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "yahoo-finance2": "^3.14.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": { "node": ">=20" }
+}
