@@ -1,0 +1,14 @@
+{
+  "_note": "Do NOT edit by hand. install.sh generates the real .mcp.json with your machine's absolute path. This file is only a reference for what it produces.",
+  "mcpServers": {
+    "drishti-mcp": {
+      "command": "node",
+      "args": ["/path/to/Drishti/drishti-mcp/dist/index.js"]
+    },
+    "nse-mcp": {
+      "command": "node",
+      "args": ["/path/to/Drishti/reference/NSE-MCP/dist/index.js"]
+    },
+    "kite": { "type": "url", "url": "https://mcp.kite.trade/sse" }
+  }
+}
