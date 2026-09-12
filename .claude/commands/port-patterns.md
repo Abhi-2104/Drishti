@@ -11,7 +11,8 @@ Steps:
 2. For virattt/ai-hedge-fund specifically:
    a. Read hedge_fund/data/protocol.py — the DataClient Protocol.
    b. Draft `india_data_client.py` implementing that protocol against our sources:
-      prices via Yahoo (.NS/.BO), financial_metrics via Screener/nse-bse, insider_trades +
+      prices via Yahoo (.NS/.BO), financial_metrics via Screener (drishti-mcp get_screener),
+      insider_trades +
       company_news via nse-mcp. HONOR the point-in-time contract (only data filed by end_date)
       and RAISE on infra failure (never silently return empty).
    c. Verify the persona alpha models in hedge_fund/signals/ run unchanged against it.

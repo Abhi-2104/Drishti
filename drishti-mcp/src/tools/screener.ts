@@ -126,6 +126,11 @@ export async function getScreener(args: ScreenerArgs): Promise<ScreenerResult> {
     hits.find((h) => new RegExp(`/company/${up}/`, "i").test(h.url)) ?? hits[0];
 
   // 2. Fetch the resolved company page (already includes /consolidated/ when it exists).
+  //    Guard: only follow Screener's own relative company paths (defense-in-depth vs a
+  //    malformed/absolute URL in the search response).
+  if (!/^\/company\/[A-Za-z0-9._-]+\//.test(resolved.url)) {
+    throw new Error(`Screener: unexpected company URL "${resolved.url}"`);
+  }
   const page = await fetchScreener(resolved.url);
   if (!page) throw new Error(`Screener: page 404 for resolved url ${resolved.url}`);
 

@@ -50,7 +50,8 @@ and why, and the current state. This file is the day-to-day operating rulebook.
 1. Exchange disclosures via nse-mcp — FII/DII, insider (SEBI PIT), bulk/block deals,
    pledges, corporate actions, announcements.
 2. Financial documents via Screener.in — statements, results, annual reports, concalls.
-3. nse-bse MCP — quotes, fundamentals, all Nifty/Sensex indices, historical.
+3. drishti-mcp — our server: Screener fundamentals (get_screener), BSE filings, IPOs, macro
+   regime, participant OI, sector rotation, US EDGAR. Quotes via Yahoo (nse-mcp get_quote).
 4. Macro prints (RBI/MOSPI/GST/UPI/auto) — only when a thesis needs them.
 5. News whitelist (config/news-sources.md) — Tier 1 primary > Tier 2 media. NEVER
    open-ended web search for "buzz"; whitelist only.

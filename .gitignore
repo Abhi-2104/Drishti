@@ -37,3 +37,7 @@ tests/
 
 # Private investor profile (opt-in, never committed)
 config/investor-profile.md
+
+# Local Claude Code + serena (dev) settings — machine-specific, not committed
+.claude/settings.local.json
+.serena/
