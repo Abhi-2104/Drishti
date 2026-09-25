@@ -1,0 +1,2 @@
+# Root .gitignore ignores tests/ (v1 scratch); v2 tests are tracked.
+!tests/
