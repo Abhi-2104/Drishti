@@ -1,16 +1,16 @@
 # Drishti v2 — P1 build plan (foundation + v1 parity)
 
-*Written 26 Sep 2026, end of Phase 0. This is the execution spec for P1. It is self-contained: a Claude Code session in the repo should be able to build from this file alone. Architecture rationale lives in `drishti-mcp-rebuild-plan.md`; data-source evidence lives in `v2-phase0-data-bakeoff-plan.md` (both in the claude.ai Project "Calibrate Drishti Investor Copilot").*
+*Written 26 Sep 2026, end of Phase 0; revised 7 Nov 2026 (cross-platform; built in the Project, not Claude Code). This is the execution spec for P1. It is self-contained: anyone picking up the build should be able to work from this file alone. Architecture rationale lives in `drishti-mcp-rebuild-plan.md`; data-source evidence lives in `v2-phase0-data-bakeoff-plan.md` (both in the claude.ai Project "Calibrate Drishti Investor Copilot").*
 
 ## 1. Who does what
-- **Build:** Abhijith / brother, running **Claude Code in a WSL terminal**, working in the repo.
-- **Plan / recalibrate:** the claude.ai Project chat. Structural changes to this plan go back there first; the Project docs are the source of truth.
-- **Repo location:** Windows Documents folder, opened from WSL at `/mnt/c/Users/abhij/Documents/Drishti` (GitHub: `Abhi-2104/Drishti`). Repo root = v1 (TypeScript, reference only — do not modify). v2 lives in `v2/`. `v2/phase0/probe.py` already exists and is the seed for `providers/`.
-- **Network:** run fetches from WSL on the home network. (Claude's cloud / bridge sandboxes are proxy-blocked for NSE/BSE/FRED — results from there are not evidence.)
+- **Plan and build both happen in the claude.ai Project** ("Calibrate Drishti Investor Copilot"). Claude writes and edits code directly in the repo through the desktop app's folder connection; Abhijith / brother run it and report results back. No Claude Code. Structural changes to this plan are made here; the Project docs are the source of truth.
+- **Repo:** GitHub `Abhi-2104/Drishti`, cloned anywhere on any OS (currently Abhijith's Windows `Documents\Drishti`; the brother's machine is separate). Repo root = v1 (TypeScript, reference only — do not modify). v2 lives in `v2/`. `v2/phase0/probe.py` already exists and is the seed for `providers/`.
+- **Network:** live fetches must run on a normal home/office network on your own machine. Claude's cloud and desktop-bridge sandboxes are proxy-blocked for NSE/BSE/FRED/Yahoo, so code is written and unit-tested there, but data runs happen on your machine — results from the sandboxes are not evidence.
 
 ## 2. Locked decisions
 - One Python package `drishti` (the investor copilot). Everything — data, signals, decisions, evidence, later portfolio — lives under it. No third-party MCP servers; nse-mcp is retired and re-implemented internally.
 - **Python ≥3.11, managed with `uv`** (`pyproject.toml`, `uv.lock`, `uv run`).
+- **Cross-platform: Windows, macOS, Linux (WSL is just Linux).** No OS-specific code paths or shell scripts. Rules: `pathlib` for every path; UTF-8 explicitly on every file read/write and console-safe output; data/config dirs from `platformdirs` (overridable in config), never hard-coded `/mnt/...` or `C:\...`; scheduling via the OS's own scheduler (Task Scheduler / cron / launchd) calling `drishti run <job>`; CI-style test run on at least Windows and Linux before calling P1 done.
 - **Rewrite, not a port.** Nothing from v1's TS is copied. Re-derive endpoints/logic in Python. v1 is read for URLs, headers and quirks.
 - Three entry points: `drishti mcp` (stdio MCP server), `drishti worker` (scheduler), `drishti run <job>` (one job by hand).
 - **Engine-agnostic MCP:** all capability exposed as tools (prompts/resources are extras). Must work in Claude Code, Claude Desktop, Cursor, Codex CLI, Gemini CLI.
@@ -27,7 +27,7 @@ v2/
 ├── pyproject.toml          # uv; console script: drishti = drishti.cli:main
 ├── drishti/
 │   ├── cli.py              # mcp | worker | run <job> | jobs (list)
-│   ├── config.py           # settings file: data dir, watchlist (symbols + BSE scrip codes)
+│   ├── config.py           # settings file: data dir (platformdirs default), watchlist (symbols + BSE scrip codes)
 │   ├── core/
 │   │   ├── envelope.py     # Result{data, as_of, sources[], error}; typed ErrorKind
 │   │   ├── fetch.py        # the only HTTP entry point (see §4)
@@ -86,7 +86,7 @@ Build `drishti run <job>` for every job first; the always-on `drishti worker` lo
 | `fred_weekly` | weekly | fred_csv |
 | `cot_weekly` | Sat (after Fri release) | cftc |
 
-Worker runs via Windows Task Scheduler / cron calling `drishti run <job>` (simplest), or `drishti worker` as a long-running process.
+Worker runs via the OS scheduler calling `drishti run <job>` — Windows Task Scheduler, cron (Linux/WSL), or launchd (macOS) — or `drishti worker` as a long-running process. Provide a one-line install recipe for each OS, not a script for one.
 
 ## 8. MCP server (`drishti mcp`)
 Use the official Python MCP SDK (`mcp`). Tools read the store first, live fetch only if missing/stale, and always return the envelope. P1 parity tools (v1 names kept where sensible): `get_screener`, `get_bse_announcements`, `get_ipos`, `get_macro_regime`, `get_participant_oi`, `get_sector_rotation`, `get_us_quote`, `get_us_fundamentals`, `get_us_filings`, plus `data_health`. Also expose the Phase 0 data now available: FII/DII, bulk/block deals, short selling, options (PCR/max pain/OI walls), Gift Nifty.
@@ -98,11 +98,11 @@ Use the official Python MCP SDK (`mcp`). Tools read the store first, live fetch 
 3. `store/` schema + tests.
 4. Providers in this order: `nse_archive` → `fred_csv` → `yahoo` → `bse` → `nse_live` → `cftc` → `edgar` → `screener` → `nsdl`; stubs for the rest. Each with a parser test on a saved sample file.
 5. Jobs + `drishti run <job>` for each; then `drishti worker`.
-6. MCP server + parity tools; register in `.mcp.json` for Claude Code and test end-to-end.
+6. MCP server + parity tools; register it in at least two MCP clients (e.g. Claude Desktop and one other) and test end-to-end.
 
 ## 10. Acceptance — P1 is done when
-- `uv run drishti run <job>` writes real data to the store for every 🟢/🟡 provider above, from WSL.
-- `uv run drishti mcp` serves the parity tools from the store in Claude Code.
+- `uv run drishti run <job>` writes real data to the store for every 🟢/🟡 provider above, on both Windows and a Linux/macOS machine.
+- `uv run drishti mcp` serves the parity tools from the store in an MCP client (Claude Desktop at minimum).
 - Every induced failure (block, timeout, empty, bad parse) shows up as a typed error in `job_log` — never a blank.
 - No provider calls `sleep()` or `requests` directly — all HTTP goes through `core/fetch.py`.
 - Tests pass: `uv run pytest`.
@@ -111,6 +111,6 @@ Use the official Python MCP SDK (`mcp`). Tools read the store first, live fetch 
 Seasonality and cycle phase (P2); `/macro` synthesis and signal scoring math (P2/P3); evidence layer / LangExtract (P4); prompts and narrative runs (P4); RBI/MoSPI/PMI/ratings/transcripts (P5); portfolio/L6 (deferred).
 
 ## 12. Open items carried forward
-- Market-hours test of Yahoo `RELIANCE.NS` (next trading day).
+- Market-hours test of Yahoo `RELIANCE.NS` (still pending as of 7 Nov 2026).
 - Which machine stays on in the evenings to run the worker.
 - Which recurring narrative runs are wanted, and on which engine.
