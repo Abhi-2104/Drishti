@@ -4,6 +4,8 @@ from __future__ import annotations
 import csv
 import functools
 import io
+import re
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import date, timedelta
 from typing import Any, Callable, Iterable
@@ -159,3 +161,33 @@ def latest(fn: Callable[[date], Result], start: date | None = None, max_back: in
                 return r
         d -= timedelta(days=1)
     return Result(error=DrishtiError(ErrorKind.NOT_FOUND, f"no file in the last {max_back} weekdays before {start or today_ist()}"))
+
+
+_XBRL_VERSION = re.compile(rb"<!--\s*(?:PIT|SHP)\s+V([\d.]+)")
+
+
+def xbrl_facts(xml: bytes, family: str, label: str) -> tuple[dict[str, dict[str, str]], str | None]:
+    """BSE/NSE XBRL instance -> ({contextRef: {FactName: text}}, form version).
+
+    `family` is 'co' (insider trading) or 'shp' (shareholding). The namespace URI carries the taxonomy date
+    (.../xbrl/shp/2025-10-31/in-bse-shp), which changes between form versions, so only its shape is matched.
+    DTDs and entities are refused: the stdlib parser would expand them.
+    """
+    head = xml[:4000].upper()
+    if b"<!DOCTYPE" in head or b"<!ENTITY" in head:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: DTD/entity declarations are not accepted")
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as e:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: not valid XML ({e})") from e
+    pre, post = f"http://www.bseindia.com/xbrl/{family}/", f"/in-bse-{family}"
+    ctx: dict[str, dict[str, str]] = {}
+    for el in root:
+        cid = el.get("contextRef")
+        if not cid or not el.tag.startswith("{"):
+            continue
+        ns, _, local = el.tag[1:].partition("}")
+        if ns.startswith(pre) and ns.endswith(post):
+            ctx.setdefault(cid, {})[local] = (el.text or "").strip()
+    m = _XBRL_VERSION.search(xml[:600])
+    return ctx, (m.group(1).decode() if m else None)

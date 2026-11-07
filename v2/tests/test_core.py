@@ -55,6 +55,7 @@ def use(monkeypatch, *items):
     (resp(200, b"  \n"), "csv", ErrorKind.EMPTY),
     (resp(200, b"<!DOCTYPE html><html>Access Denied</html>"), "json", ErrorKind.BLOCKED_HTML),
     (resp(200, b"\n<html><head></head></html>"), "zip", ErrorKind.BLOCKED_HTML),
+    (resp(200, b"<html><body>Access Denied</body></html>"), "xml", ErrorKind.BLOCKED_HTML),
     (requests.ReadTimeout(), "csv", ErrorKind.TIMEOUT),
     (requests.ConnectTimeout(), "csv", ErrorKind.TIMEOUT),
     (requests.ConnectionError("refused"), "csv", ErrorKind.NETWORK),

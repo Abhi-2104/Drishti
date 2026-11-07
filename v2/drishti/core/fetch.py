@@ -23,7 +23,7 @@ from .ratelimit import RateLimiter, Rule
 
 log = logging.getLogger("drishti.fetch")
 
-Expect = Literal["json", "csv", "zip", "html", "text"]
+Expect = Literal["json", "csv", "zip", "xml", "html", "text"]
 
 # Chrome 153 is what the scout verified against the BSE API, which rejects stale Chrome
 # strings (120/131/140 got 403). Override without a code change via DRISHTI_BROWSER_UA.
@@ -148,7 +148,7 @@ def _once(profile: Profile, url: str, expect: Expect, headers: dict | None) -> F
         raise DrishtiError(ErrorKind.NETWORK, f"HTTP {code} {url}")
     if not body.strip():
         raise DrishtiError(ErrorKind.EMPTY, f"empty body {url}")
-    if expect in ("csv", "zip", "json") and looks_like_html(body):
+    if expect in ("csv", "zip", "json", "xml") and looks_like_html(body):
         raise DrishtiError(ErrorKind.BLOCKED_HTML, f"HTML where {expect} expected {url}")
     return Fetched(url, body, code)
 
