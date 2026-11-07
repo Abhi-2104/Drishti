@@ -15,10 +15,13 @@ For each source it:
 
 No API keys, no accounts. Only dependency: requests.
 
-Usage (inside WSL):
-    python3 -m pip install --user requests
-    python3 probe.py            # full run, ~3-5 minutes
-    python3 probe.py --quick    # 1 attempt per source
+Works on Windows, macOS, Linux and WSL (Python 3.10+). Run it on a normal
+home/office network -- sandboxed or proxied environments block these sites.
+
+Usage (use `python` or `py` on Windows, `python3` elsewhere):
+    python -m pip install requests
+    python probe.py            # full run, ~3-5 minutes
+    python probe.py --quick    # 1 attempt per source
 """
 from __future__ import annotations
 
@@ -38,7 +41,14 @@ from typing import Callable, Optional
 try:
     import requests
 except ImportError:  # pragma: no cover
-    sys.exit("Missing dependency: run  python3 -m pip install --user requests")
+    sys.exit("Missing dependency: run  python -m pip install requests")
+
+# Windows consoles may default to a legacy code page; never crash on output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:  # noqa: BLE001 - very old/odd streams
+        pass
 
 IST = timezone(timedelta(hours=5, minutes=30))
 TIMEOUT = 20
