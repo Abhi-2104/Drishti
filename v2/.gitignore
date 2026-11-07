@@ -4,3 +4,6 @@
 # Scout run outputs: regenerate locally, do not commit
 phase0/scout/retest_*.json
 phase0/scout/retest_report.md
+
+# Raw fixture captures (large, regenerate with phase0/scout/capture_fixtures.py); trimmed copies are committed instead
+tests/fixtures/_raw/
