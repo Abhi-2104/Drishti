@@ -158,3 +158,38 @@ def test_cache_ttl_expiry():
     assert c.get("k") == "v"
     now[0] += 0.2
     assert c.get("k") is None
+
+
+# --- WP0 fixes: HTML blocks are retried, real limiter rules, per-source UA --
+def test_blocked_html_is_retried_and_rewarmed(monkeypatch):
+    s = use(monkeypatch, resp(200, b"<!DOCTYPE html><html>Access Denied</html>"), resp(200, b"{}"))
+    sleeps, rewarms = [], []
+    monkeypatch.setattr(fetch, "_sleep", sleeps.append)
+    got = fetch.get("https://x.test/j", PROFILE, expect="json", on_blocked=lambda: rewarms.append(1))
+    assert got.body == b"{}" and len(s.calls) == 2
+    assert sleeps == [1.0] and len(rewarms) == 1
+
+
+def test_default_limiter_rules():
+    lim = fetch.default_limiter()
+    nse = {lim._match(h)[0] for h in ("www.nseindia.com", "nsearchives.nseindia.com", "archives.nseindia.com")}
+    bse = {lim._match(h)[0] for h in ("api.bseindia.com", "www.bseindia.com")}
+    sec = {lim._match(h)[0] for h in ("www.sec.gov", "data.sec.gov")}
+    assert nse == {"nseindia.com"} and bse == {"bseindia.com"} and sec == {"sec.gov"}
+    assert lim._match("api.bseindia.com")[1].interval == 0.5
+    assert lim._match("query1.finance.yahoo.com")[1].interval == 0.3
+    assert lim._match("rbi.org.in") == ("rbi.org.in", Rule(1.0))  # unknown host: 1 s default
+
+
+def test_browser_headers_use_current_ua_and_allow_override(monkeypatch):
+    monkeypatch.delenv("DRISHTI_BROWSER_UA", raising=False)
+    h = fetch.browser_headers({"Origin": "https://www.bseindia.com"})
+    assert "Chrome/153" in h["User-Agent"] and h["Origin"] == "https://www.bseindia.com"
+    fetch.Profile("bse", h)  # a browser header set is a valid profile
+    monkeypatch.setenv("DRISHTI_BROWSER_UA", "Mozilla/5.0 Chrome/999")
+    assert fetch.browser_headers()["User-Agent"] == "Mozilla/5.0 Chrome/999"
+    assert fetch.browser_headers() is not fetch.browser_headers()  # fresh dict each call
+
+
+def test_honest_ua_is_not_a_browser_string():
+    assert "Mozilla" not in fetch.HONEST_UA and "@" not in fetch.HONEST_UA

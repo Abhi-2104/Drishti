@@ -7,6 +7,7 @@ Classification mirrors probe.py's fetch_once (proven in Phase 0).
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,29 +25,51 @@ log = logging.getLogger("drishti.fetch")
 
 Expect = Literal["json", "csv", "zip", "html", "text"]
 
-BROWSER_UA = (
+# Chrome 153 is what the scout verified against the BSE API, which rejects stale Chrome
+# strings (120/131/140 got 403). Override without a code change via DRISHTI_BROWSER_UA.
+DEFAULT_BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
 )
-BROWSER_HEADERS = {
-    "User-Agent": BROWSER_UA,
-    "Accept": "text/html,application/xhtml+xml,application/json,text/csv,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-}
+# For sources that tarpit spoofed browsers (FRED). No contact details baked in; EDGAR builds its own.
+HONEST_UA = "drishti-copilot/0.1 (personal research tool)"
 
-# Plan §4 starting values.
-limiter = RateLimiter(
-    rules={
-        "nseindia.com": Rule(0.5, jitter=0.25),  # www / nsearchives / archives share one slot
-        "api.bseindia.com": Rule(0.5),
-        "query1.finance.yahoo.com": Rule(0.3),
-        "fred.stlouisfed.org": Rule(0.5),
-        "sec.gov": Rule(0.1),  # SEC's published limit: 10 req/s, www + data share it
-    },
-    default=Rule(1.0),
-)
+# Both mean "the server refused us": back off, re-warm, retry. (NSE often blocks with a 200 HTML page.)
+RETRYABLE = (ErrorKind.BLOCKED, ErrorKind.BLOCKED_HTML)
+
+
+def browser_ua() -> str:
+    return os.environ.get("DRISHTI_BROWSER_UA", "").strip() or DEFAULT_BROWSER_UA
+
+
+def browser_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """A fresh browser-like header set with the current UA, for building a Profile. `extra` adds/overrides."""
+    h = {
+        "User-Agent": browser_ua(),
+        "Accept": "text/html,application/xhtml+xml,application/json,text/csv,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+    }
+    h.update(extra or {})
+    return h
+
+
+def default_limiter() -> RateLimiter:
+    """Plan section 4 starting values. A factory so tests can check the real rules."""
+    return RateLimiter(
+        rules={
+            "nseindia.com": Rule(0.5, jitter=0.25),  # www / nsearchives / archives share one slot
+            "bseindia.com": Rule(0.5),               # api. and www. (UDiFF bhavcopy) share one slot
+            "query1.finance.yahoo.com": Rule(0.3),
+            "fred.stlouisfed.org": Rule(0.5),
+            "sec.gov": Rule(0.1),  # SEC's published limit: 10 req/s, www + data share it
+        },
+        default=Rule(1.0),
+    )
+
+
+limiter = default_limiter()
 cache = TTLCache()
 BACKOFF_BASE = 1.0  # seconds; 1, 2, 4... on BLOCKED
 _sleep = time.sleep  # the only sleep outside the limiter; patched in tests
@@ -58,7 +81,7 @@ class Profile:
     name: str
     headers: dict[str, str]
     timeout: tuple[float, float] = (5.0, 15.0)  # (connect, read)
-    retries: int = 2  # extra attempts after BLOCKED, with exponential backoff
+    retries: int = 2  # extra attempts after BLOCKED / BLOCKED_HTML, with exponential backoff
 
     def __post_init__(self):
         if not self.headers.get("User-Agent"):
@@ -142,7 +165,7 @@ def get(
     """GET `url` as `profile`. Raises DrishtiError; never returns a blank.
 
     ttl > 0: serve/keep successful responses in the in-memory cache for ttl seconds.
-    on_blocked: called before each retry after 401/403/429 (e.g. NSE session re-warm).
+    on_blocked: called before each retry after 401/403/429 or an HTML block page (e.g. NSE session re-warm).
     """
     if ttl:
         hit = cache.get(url)
@@ -155,7 +178,7 @@ def get(
             got = _once(profile, url, expect, headers)
             break
         except DrishtiError as e:
-            if e.kind is not ErrorKind.BLOCKED or attempt == profile.retries:
+            if e.kind not in RETRYABLE or attempt == profile.retries:
                 log.debug("%s: %s", profile.name, e)
                 raise
             wait = BACKOFF_BASE * 2 ** attempt

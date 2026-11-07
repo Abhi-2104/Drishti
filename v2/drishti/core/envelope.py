@@ -17,6 +17,7 @@ class ErrorKind(StrEnum):
     BLOCKED_HTML = "BLOCKED_HTML"  # HTML page where data was expected
     NOT_FOUND = "NOT_FOUND"        # 404
     EMPTY = "EMPTY"                # fetched fine, nothing in it
+    STALE = "STALE"                # fetched fine, newest record is too old (freshness canary)
     PARSE_FAIL = "PARSE_FAIL"      # fetched fine, layout not what we expect
     NETWORK = "NETWORK"            # connection errors and any other non-2xx
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"  # P1 stubs
