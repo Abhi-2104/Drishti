@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -112,7 +114,62 @@ def group_bse() -> None:
     print(f"bse_bhavcopy: {len(out)} rows")
 
 
-GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse}
+def group_pit() -> None:
+    src, dst = RAW / "pit", ROOT / "nse_pit"
+    dst.mkdir(parents=True, exist_ok=True)
+    doc = json.loads((RAW / "nse_live" / "pit_gg_7d.json").read_text(encoding="utf-8"))
+    have = {p.name for p in src.glob("*.xml")}
+    mine = [r for r in doc["data"] if r["xmlFileName"].rsplit("/", 1)[-1] in have]  # the filings we saved XML for
+    others = [r for r in doc["data"] if r not in mine][:9]
+    (dst / "pit_gg_list.json").write_text(json.dumps({"data": mine + others}, indent=1), encoding="utf-8", newline="\n")
+    for x in src.glob("*.xml"):
+        shutil.copyfile(x, dst / x.name)
+    print(f"pit: list of {len(mine) + len(others)} filings ({len(mine)} with XML), {len(have)} xml files")
+
+
+def _trim_shp_xbrl(text: str) -> str:
+    """Keep the filing header, the aggregate (…_ContextI) facts and the promoter detail rows; drop the public
+    holders, SBO tables and unused contexts. The numbers the parser reads are untouched."""
+    fact = re.compile(r'<in-bse-shp:\w+ contextRef="([^"]+)"[^>]*?(?:/>|>[^<]*</in-bse-shp:\w+>)')
+    ctxdef = re.compile(r'<xbrli:context id="([^"]+)">.*?</xbrli:context>', re.S)
+    facts: dict[str, set[str]] = {}
+    for m in re.finditer(r'<in-bse-shp:(\w+) contextRef="([^"]+)"', text):
+        facts.setdefault(m.group(2), set()).add(m.group(1))
+    promoter_detail = {c[2:] for c, f in facts.items() if c.startswith("D_") and "TypeOfPromoterShareholding" in f}
+    aggregates = {"MainD", "MainI", "ShareholdingOfPromoterAndPromoterGroup_ContextI", "PublicShareholding_ContextI",
+                  "SharesHeldByNonPromoterNonPublicShareholders_ContextI", "ShareholdingPattern_ContextI"}
+    keep = aggregates | promoter_detail | {"D_" + c for c in promoter_detail}  # exactly what the parser reads
+    text = fact.sub(lambda m: m.group(0) if m.group(1) in keep else "", text)
+    return ctxdef.sub(lambda m: m.group(0) if m.group(1) in keep else "", text)
+
+
+def group_shp() -> None:
+    src, dst = RAW / "shp", ROOT / "nse_shp"
+    dst.mkdir(parents=True, exist_ok=True)
+    picks = {"VEDL": "shp_vedl_latest.xml", "ALPSINDUS": "shp_pledged_ALPSINDUS_20260930.xml",
+             "ARSHIYA": "shp_pledged_ARSHIYA_20260930.xml", "20MICRONS": "shp_clean_20MICRONS_20260930.xml"}
+    for sym, name in picks.items():
+        text = (src / name).read_text(encoding="utf-8")
+        out = _trim_shp_xbrl(text)
+        (dst / f"shp_{sym}.xml").write_text(out, encoding="utf-8", newline="")
+        print(f"shp {sym}: {len(text):,} -> {len(out):,} bytes")
+    rows = json.loads((RAW / "nse_live" / "shp_master_market.json").read_text(encoding="utf-8"))
+    mine = [r for r in rows if r["symbol"] in picks or r["symbol"] == "KIRIINDUS"]  # Kiri: event-dated filing, no XML kept
+    seen = {id(r) for r in mine}
+    revised = [r for r in rows if r.get("revisedData") == "Revised" and id(r) not in seen][:3]
+    no_isin = [r for r in rows if not r.get("isin") and id(r) not in seen][:2]
+    event = [r for r in rows if r["date"] not in ("30-SEP-2026", "30-JUN-2026") and id(r) not in seen][:3]
+    filler_q = [r for r in rows if r["date"] in ("30-SEP-2026", "30-JUN-2026") and id(r) not in seen][:40]
+    out = mine + revised + no_isin + event + filler_q
+    for r in out:  # remarks can run to pages
+        for k in ("remarksWeb", "promoterDematNotes", "publicShareholdingNotes", "shareholdingPatternNotes", "revisionRemark"):
+            if isinstance(r.get(k), str):
+                r[k] = r[k][:80]
+    (dst / "shp_master.json").write_text(json.dumps(out, indent=1), encoding="utf-8", newline="\n")
+    print(f"shp master: {len(out)} of {len(rows)} rows ({len(mine)} for the picked companies)")
+
+
+GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse, "pit": group_pit, "shp": group_shp}
 
 
 def main() -> int:
