@@ -100,7 +100,7 @@ def test_unknown_transaction_type_is_kept_as_other():
 
 def test_invalid_isin_is_flagged_not_fatal():
     (e,) = p.parse_pit_filing(xml(INDOSTAR).replace(b"INE896L01010", b"INE896L01011"))
-    assert e["isin_valid"] is False and e["isin"] == "INE896L01011"
+    assert e["isin_valid"] is False and e["isin"] is None and e["isin_raw"] == "INE896L01011"  # never join on a bad ISIN
 
 
 @pytest.mark.parametrize("body,needle", [
@@ -228,3 +228,17 @@ def test_index_errors_are_typed(net):
     assert p.insider_trades(today=TODAY).error.kind == ErrorKind.EMPTY
     net(b"<html>")
     assert p.insider_trades(today=TODAY).error.kind == ErrorKind.PARSE_FAIL
+
+
+def test_pledge_revoke_and_invoke_are_not_other():
+    """NSE writes 'Pledge Revoke' / 'Pledge Invoke' (live run: 9 events landed in OTHER before this was fixed)."""
+    d = p._direction
+    assert [d(x) for x in ("Buy", "Sell", "Pledge", "Pledge Revoke", "Pledge Invoke", "Revocation of Pledge", "Invocation")] == \
+        ["BUY", "SELL", "PLEDGE", "REVOKE", "INVOKE", "REVOKE", "INVOKE"]
+    assert d("Gift") == "OTHER"
+
+
+def test_placeholder_isin_does_not_become_a_join_key():
+    body = re.sub(rb'(ISINCode[^>]*>)[^<]*', rb"\1ZZZ999Z99999", xml(KRONOX_NEW))
+    (e,) = p.parse_pit_filing(body)
+    assert e["isin"] is None and e["isin_raw"] == "ZZZ999Z99999" and e["isin_valid"] is False and e["symbol"] == "KRONOX"

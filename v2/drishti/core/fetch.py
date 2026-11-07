@@ -36,6 +36,7 @@ HONEST_UA = "drishti-copilot/0.1 (personal research tool)"
 
 # Both mean "the server refused us": back off, re-warm, retry. (NSE often blocks with a 200 HTML page.)
 RETRYABLE = (ErrorKind.BLOCKED, ErrorKind.BLOCKED_HTML)
+TRANSIENT = (ErrorKind.NETWORK, ErrorKind.TIMEOUT)  # connection reset / timeout: retried the same way, then raised typed
 
 
 def browser_ua() -> str:
@@ -178,13 +179,13 @@ def get(
             got = _once(profile, url, expect, headers)
             break
         except DrishtiError as e:
-            if e.kind not in RETRYABLE or attempt == profile.retries:
+            if e.kind not in RETRYABLE + TRANSIENT or attempt == profile.retries:
                 log.debug("%s: %s", profile.name, e)
                 raise
             wait = BACKOFF_BASE * 2 ** attempt
             log.info("%s blocked (%s), retry %d in %.0fs", profile.name, e.detail, attempt + 1, wait)
             _sleep(wait)
-            if on_blocked:
+            if on_blocked and e.kind in RETRYABLE:
                 on_blocked()
     if ttl:
         cache.set(url, got, ttl)

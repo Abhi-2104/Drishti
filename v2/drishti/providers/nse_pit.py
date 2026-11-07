@@ -39,8 +39,16 @@ _EVENT_FIELDS = {  # XBRL local name -> our key ("Acquistion" is NSE's own spell
     "ModeOfAcquisitionOrDisposal": "mode", "DateOfIntimationToCompany": "intimation_date",
     "ExchangeOnWhichTheTradeWasExecuted": "exchange",
 }
-_DIRECTIONS = {"buy": "BUY", "sell": "SELL", "pledge": "PLEDGE", "revoke": "REVOKE", "revocation": "REVOKE",
-               "invoke": "INVOKE", "invocation": "INVOKE"}
+def _direction(txn_type: str) -> str:
+    """NSE's transaction types: Buy, Sell, Pledge, 'Pledge Revoke', 'Pledge Invoke' (older forms: Revocation/Invocation)."""
+    t = txn_type.strip().lower()
+    if t in ("buy", "sell"):
+        return t.upper()
+    if "revo" in t:
+        return "REVOKE"
+    if "invo" in t:
+        return "INVOKE"
+    return "PLEDGE" if t == "pledge" else "OTHER"
 
 
 def parse_pit_list(body: bytes) -> list[dict]:
@@ -81,7 +89,7 @@ def parse_pit_filing(xml: bytes) -> list[dict]:
     if not main.get("Symbol") and not main.get("ScripCode"):
         raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: filing names neither a symbol nor a scrip code")
     filing = {
-        "isin": isin or None, "isin_valid": is_valid_isin(isin), "symbol": u.opt_str(main.get("Symbol")),
+        "isin": isin if is_valid_isin(isin) else None, "isin_raw": isin or None, "isin_valid": is_valid_isin(isin), "symbol": u.opt_str(main.get("Symbol")),
         "scrip_code": u.opt_str(main.get("ScripCode")), "company": u.opt_str(main.get("NameOfTheCompany")),
         "filing_date": u.iso_date(main["DateOfFiling"], f"{label}.DateOfFiling") if main.get("DateOfFiling") else None,
         "regulation": u.opt_str(main.get("DisclosureUnderRegulation")),
@@ -99,7 +107,7 @@ def parse_pit_filing(xml: bytes) -> list[dict]:
         ev = dict(filing)
         ev.update({
             "instrument": raw.get("instrument"), "category": raw["category"], "person": raw["person"],
-            "txn_type": raw["txn_type"], "direction": _DIRECTIONS.get(raw["txn_type"].strip().lower(), "OTHER"),
+            "txn_type": raw["txn_type"], "direction": _direction(raw["txn_type"]),
             "quantity": u.integer(raw.get("quantity"), "quantity"), "value_inr": u.num(raw.get("value_inr"), "value_inr"),
             "held_pre_shares": u.integer(raw.get("held_pre_shares"), "held_pre_shares"),
             "held_pre_pct": _pct(raw.get("held_pre_pct")), "held_post_shares": u.integer(raw.get("held_post_shares"), "held_post_shares"),

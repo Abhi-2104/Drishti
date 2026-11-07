@@ -82,6 +82,21 @@ def test_blocked_retries_with_backoff_and_rewarm(monkeypatch):
     assert sleeps == [1.0, 2.0] and len(rewarms) == 2
 
 
+def test_connection_reset_is_retried_then_succeeds(monkeypatch):
+    """Live run: one JSWSTEEL filing died on a single WinError 10054. Transient network errors get the same backoff."""
+    s = use(monkeypatch, requests.ConnectionError("reset"), requests.ReadTimeout(), resp(200, b"ok"))
+    rewarms = []
+    got = fetch.get("https://x.test/n", PROFILE, on_blocked=lambda: rewarms.append(1))
+    assert got.body == b"ok" and len(s.calls) == 3 and rewarms == []   # no session re-warm for a plain network blip
+
+
+def test_persistent_network_failure_still_raises_typed(monkeypatch):
+    s = use(monkeypatch, *[requests.ConnectionError("down")] * 3)
+    with pytest.raises(DrishtiError) as e:
+        fetch.get("https://x.test/n", PROFILE)
+    assert e.value.kind is ErrorKind.NETWORK and len(s.calls) == 3
+
+
 def test_not_found_is_not_retried(monkeypatch):
     s = use(monkeypatch, resp(404))
     with pytest.raises(DrishtiError):
