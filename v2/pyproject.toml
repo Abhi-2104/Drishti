@@ -5,6 +5,7 @@ description = "Drishti investor copilot: Indian-market data, signals and MCP ser
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
+    "platformdirs>=4.2",
 ]
 
 [project.scripts]
