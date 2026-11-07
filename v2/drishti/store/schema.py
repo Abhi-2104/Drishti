@@ -2,7 +2,15 @@
 provider through Store.ensure_table(); this file holds the shared core."""
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Columns added after v1: (table, column, type). A v1 store gets them via ALTER TABLE in Store._migrate.
+ADDED_COLUMNS = (
+    ("security", "instrument_class", "TEXT"),   # equity | fund | debt | sovereign | other (from the ISIN's shape)
+    ("security", "nse_series", "TEXT"),         # EQ / BE / BZ / SM ...
+    ("security", "bse_series", "TEXT"),         # A / B / X / M (SME) / ...
+    ("security", "nse_listed_on", "TEXT"),      # ISO date of NSE listing
+)
 
 # One raw blob per (dataset, trade_date): the latest fetch wins. The row doubles as the "already fetched" marker.
 DDL = """
@@ -57,7 +65,11 @@ CREATE TABLE IF NOT EXISTS security (
     bse_scrip  TEXT,
     bse_symbol TEXT,
     source     TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    instrument_class TEXT,
+    nse_series TEXT,
+    bse_series TEXT,
+    nse_listed_on TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_security_nse ON security (nse_symbol);
 CREATE INDEX IF NOT EXISTS ix_security_bse ON security (bse_scrip);

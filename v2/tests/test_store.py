@@ -377,3 +377,21 @@ def test_data_persists_across_reopen(tmp_path):
         s.upsert_security("INE002A01018", name="R")
     with Store(p) as s:
         assert s.has_blob("ds", D) and s.get_security("INE002A01018")["name"] == "R"
+
+
+def test_v1_store_is_migrated_in_place(tmp_path):
+    """A store created by the first release (security table without the new columns) opens, keeps its rows and gains the columns."""
+    import sqlite3
+    path = tmp_path / "old.sqlite"
+    con = sqlite3.connect(path)
+    con.executescript("CREATE TABLE security (isin TEXT PRIMARY KEY, name TEXT, nse_symbol TEXT, bse_scrip TEXT, bse_symbol TEXT, source TEXT, updated_at TEXT NOT NULL);"
+                      "INSERT INTO security VALUES ('INE002A01018','Reliance','RELIANCE',NULL,NULL,'t','2026-11-07T00:00:00'); PRAGMA user_version = 1;")
+    con.commit(); con.close()
+    with Store(path) as s:
+        assert s.query("PRAGMA user_version")[0]["user_version"] == SCHEMA_VERSION
+        row = s.get_security("INE002A01018")
+        assert row["name"] == "Reliance" and {"instrument_class", "nse_series", "bse_series", "nse_listed_on"} <= set(row)
+        s.upsert_security("INE002A01018", instrument_class="equity", bse_scrip="500325", source="t2")
+        assert s.get_security("INE002A01018")["instrument_class"] == "equity"
+    with Store(path) as s:   # opening twice is harmless
+        assert s.get_security("INE002A01018")["bse_scrip"] == "500325"

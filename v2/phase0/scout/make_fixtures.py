@@ -181,7 +181,23 @@ def group_macro() -> None:
     print("macro: fiidii, fred x2 (400 rows), cftc FinFutWk")
 
 
-GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse, "pit": group_pit, "shp": group_shp, "macro": group_macro}
+def group_master() -> None:
+    """EQUITY_L trimmed to the companies present in the BSE / NSE bhavcopy fixtures (so cross-listings line up) plus a head sample.
+    Run after the bse and nse_archive groups."""
+    dst = ROOT / "nse_archive"
+    isins = set()
+    for line in (ROOT / "bse" / "BhavCopy_BSE_CM_20261106.csv").read_text(encoding="utf-8-sig").splitlines()[1:]:
+        isins.add(line.split(",")[6])
+    _, text = _read_zip(dst / "BhavCopy_NSE_CM_20261106.csv.zip")
+    for r in list(csv.reader(io.StringIO(text)))[1:]:
+        isins.add(r[6])
+    lines = (RAW / "nse_archive" / "EQUITY_L.csv").read_text(encoding="utf-8-sig").splitlines()
+    keep = [lines[0]] + [ln for i, ln in enumerate(lines[1:]) if i < 40 or ln.split(",")[6].strip() in isins or ln.split(",")[0] in ("VIRAT",)]
+    (dst / "EQUITY_L.csv").write_text("\n".join(keep) + "\n", encoding="utf-8", newline="\n")
+    print(f"equity_l: {len(keep) - 1} of {len(lines) - 1} rows")
+
+
+GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse, "pit": group_pit, "shp": group_shp, "macro": group_macro, "master": group_master}
 
 
 def main() -> int:

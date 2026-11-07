@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from ..core.envelope import DrishtiError, ErrorKind, Result, now_utc
 from ..core.fetch import Fetched
-from .schema import DDL, SCHEMA_VERSION
+from .schema import ADDED_COLUMNS, DDL, SCHEMA_VERSION
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _IDEMPOTENT = re.compile(r"^\s*CREATE\s+(TABLE|INDEX|UNIQUE\s+INDEX)\s+IF\s+NOT\s+EXISTS\s", re.I)
@@ -79,6 +79,9 @@ class Store:
             if have > SCHEMA_VERSION:
                 raise RuntimeError(f"store schema v{have} is newer than this drishti (v{SCHEMA_VERSION}); upgrade drishti")
             self._db.executescript(DDL)
+            for table, col, typ in ADDED_COLUMNS:  # a v1 store was created without these; fresh stores already have them
+                if col not in {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._db.commit()
 
@@ -244,31 +247,45 @@ class Store:
 
     # --- security master (ISIN is the key) ----------------------------------------------------------
     def upsert_security(self, isin: str, *, name: str | None = None, nse_symbol: str | None = None,
-                        bse_scrip: str | None = None, bse_symbol: str | None = None, source: str = "") -> None:
+                        bse_scrip: str | None = None, bse_symbol: str | None = None, source: str = "",
+                        instrument_class: str | None = None, nse_series: str | None = None, bse_series: str | None = None,
+                        nse_listed_on: str | None = None) -> None:
         """Merge facts about one security. A later source adds fields but never blanks an existing one,
         so NSE EQUITY_L and the BSE bhavcopy can each contribute their half of a cross-listing."""
         if not isin or not str(isin).strip():
             raise ValueError("isin is required")
         self._run(
-            "INSERT INTO security (isin, name, nse_symbol, bse_scrip, bse_symbol, source, updated_at) VALUES (?,?,?,?,?,?,?) "
+            "INSERT INTO security (isin, name, nse_symbol, bse_scrip, bse_symbol, source, updated_at, "
+            "instrument_class, nse_series, bse_series, nse_listed_on) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (isin) DO UPDATE SET "
             "name=COALESCE(excluded.name, security.name), nse_symbol=COALESCE(excluded.nse_symbol, security.nse_symbol), "
             "bse_scrip=COALESCE(excluded.bse_scrip, security.bse_scrip), bse_symbol=COALESCE(excluded.bse_symbol, security.bse_symbol), "
+            "instrument_class=COALESCE(excluded.instrument_class, security.instrument_class), "
+            "nse_series=COALESCE(excluded.nse_series, security.nse_series), bse_series=COALESCE(excluded.bse_series, security.bse_series), "
+            "nse_listed_on=COALESCE(excluded.nse_listed_on, security.nse_listed_on), "
             "source=excluded.source, updated_at=excluded.updated_at",
-            (str(isin).strip().upper(), name, nse_symbol, bse_scrip and str(bse_scrip), bse_symbol, source, _ts()),
+            (str(isin).strip().upper(), name, nse_symbol, bse_scrip and str(bse_scrip), bse_symbol, source, _ts(),
+             instrument_class, nse_series, bse_series, nse_listed_on),
         )
 
     def get_security(self, isin: str) -> dict | None:
         rows = self.query("SELECT * FROM security WHERE isin=?", (str(isin).strip().upper(),))
         return rows[0] if rows else None
 
-    def find_securities(self, *, nse_symbol: str | None = None, bse_scrip: str | None = None) -> list[dict]:
-        """Lookup by NSE symbol or BSE scrip code. A list: symbols are reused over time, so callers must handle >1."""
+    def find_securities(self, *, nse_symbol: str | None = None, bse_scrip: str | None = None, bse_symbol: str | None = None) -> list[dict]:
+        """Lookup by NSE symbol, BSE scrip code or BSE symbol. A list: symbols are reused over time, so callers must handle >1."""
         if nse_symbol is not None:
             return self.query("SELECT * FROM security WHERE nse_symbol=?", (nse_symbol.strip().upper(),))
         if bse_scrip is not None:
             return self.query("SELECT * FROM security WHERE bse_scrip=?", (str(bse_scrip).strip(),))
-        raise ValueError("pass nse_symbol or bse_scrip")
+        if bse_symbol is not None:
+            return self.query("SELECT * FROM security WHERE bse_symbol=?", (bse_symbol.strip().upper(),))
+        raise ValueError("pass nse_symbol, bse_scrip or bse_symbol")
+
+    def search_securities(self, text: str, *, limit: int = 8) -> list[dict]:
+        """Substring match on the company name (for 'did you mean' suggestions). LIKE wildcards in the input are escaped."""
+        t = text.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return self.query("SELECT * FROM security WHERE name LIKE ? ESCAPE '\\' ORDER BY name LIMIT ?", (f"%{t}%", int(limit)))
 
     # --- health -------------------------------------------------------------------------------------
     def data_health(self, *, now: datetime | None = None) -> dict:
