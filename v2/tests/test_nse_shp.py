@@ -336,9 +336,13 @@ def test_validate_live_runs_end_to_end_on_fakes(monkeypatch, tmp_path, capsys):
         data={"n_total": 3, "latest": {"value": 1.5}}, as_of="2026-10-30"))
     row = {"label": "USD index", "open_interest": 10, "lev_money": {"net": 5, "net_change": 1}, "asset_mgr": {"net": -5}}
     monkeypatch.setattr(vl.cftc, "cftc_tff", lambda **k: Result(data=[row], as_of="2026-11-03"))
+    monkeypatch.setattr(vl.security_master, "build_security_master", lambda store, **k: Result(
+        data={"securities": 5, "stats": {"bse_file_date": "2026-11-06", "by_listing": {}, "by_class": {}, "nse_equities": 4, "nse_equities_seen_on_bse": 3,
+                                          "overlap": 0.75, "skipped_from_bse": {}, "rejected": 0, "conflicts": 0, "symbol_differs": 0, "warnings": []},
+              "conflicts": [], "rejected": []}, as_of="2026-11-06"))
     assert vl.main(["--shp-sample", "3"]) == 0
     out = capsys.readouterr().out
-    assert "fii_dii_cash" in out and "cftc_tff" in out and "fred_WALCL" in out
+    assert "security_master" in out and "fii_dii_cash" in out and "cftc_tff" in out and "fred_WALCL" in out
     assert "OK   shp_master" in out and "shp_filings" in out and "insider_trades_7d" in out and "0 failed" in out
     assert json.loads((tmp_path / "out.json").read_text())["report"]
 

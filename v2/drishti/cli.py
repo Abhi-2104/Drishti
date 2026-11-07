@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="run one job by hand")
     run.add_argument("job")
     sub.add_parser("jobs", help="list jobs")
+    rv = sub.add_parser("resolve", help="look up a security by ISIN, NSE/BSE symbol or BSE scrip code")
+    rv.add_argument("query")
     sub.add_parser("init", help="create the settings/profile templates (never overwrites)")
     sub.add_parser("paths", help="show where settings, profile and the database live")
     args = ap.parse_args(argv)
@@ -40,6 +42,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"drishti {args.cmd}: {e}", file=sys.stderr)
             return 2
         return 0
+    if args.cmd == "resolve":
+        from .resolve import resolve
+        from .store import Store
+        try:
+            cfg = load_settings()
+        except ConfigError as e:
+            print(f"drishti resolve: {e}", file=sys.stderr)
+            return 2
+        with Store(cfg.db_path) as st:
+            r = resolve(st, args.query)
+        if not r.ok:
+            print(f"{r.error.kind}: {r.error.detail}", file=sys.stderr)
+            return 1
+        for m in r.data["matches"]:
+            print(f"{m['isin']}  {m['name']}  NSE:{m['nse_symbol'] or '-'}  BSE:{m['bse_symbol'] or '-'} {m['bse_scrip'] or ''}  [{m['instrument_class'] or '?'}]")
+        return 3 if r.data["ambiguous"] else 0   # 3 = several companies matched: the caller must choose
     if args.cmd == "run":
         return _todo(f"run {args.job}")
     return _todo(args.cmd)

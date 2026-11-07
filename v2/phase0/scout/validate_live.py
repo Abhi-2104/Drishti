@@ -19,12 +19,13 @@ from drishti.core.canary import today_ist
 from drishti.core.envelope import DrishtiError, Result
 from drishti.core.fetch import get
 from drishti.providers import _util as u
-from drishti.providers import bse, cftc, fred, nse_archive, nse_flows, nse_pit, nse_shp
+from drishti import resolve
+from drishti.providers import bse, cftc, fred, nse_archive, nse_flows, nse_pit, nse_shp, security_master
 from drishti.providers.profiles import NSE_ARCHIVE
 from drishti.store import Store
 
 OUT = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "_raw" / "validate_live.json"
-GROUPS = ("archive", "bse", "pit", "shp", "macro")
+GROUPS = ("archive", "bse", "pit", "shp", "macro", "master")
 
 
 def line(ok: bool, name: str, secs: float, detail: str) -> None:
@@ -122,6 +123,28 @@ def group_macro(report: list, store: Store) -> None:
               f"  asset mgrs net {x['asset_mgr']['net']:>+10,}")
 
 
+def group_master(report: list, store: Store) -> None:
+    r = show(report, "security_master", lambda: security_master.build_security_master(store),
+             lambda r: f"{r.data['securities']} securities; BSE file {r.data['stats']['bse_file_date']}")
+    if not r.ok:
+        return
+    st = r.data["stats"]
+    print("     " + json.dumps({k: st[k] for k in ("by_listing", "by_class", "nse_equities", "nse_equities_seen_on_bse", "overlap",
+                                                    "skipped_from_bse", "rejected", "conflicts", "symbol_differs", "warnings")}, default=str))
+    for c in r.data["conflicts"][:5]:
+        print(f"     CONFLICT {c}")
+    for x in r.data["rejected"][:5]:
+        print(f"     REJECTED {x}")
+    bse_only = store.query("SELECT bse_scrip, bse_symbol FROM security WHERE nse_symbol IS NULL AND bse_series IN ('A','B') AND instrument_class='equity' LIMIT 2")
+    for q in ["RELIANCE", "500325", "M&M", "INFRABEES", "GOLDBEES"] + [x["bse_scrip"] for x in bse_only]:
+        rr = resolve.resolve(store, q)
+        if rr.ok:
+            for m in rr.data["matches"]:
+                print(f"     {q:<10s} -> {m['isin']} {m['name'][:28]:<28s} NSE {m['nse_symbol']} ({m['nse_series']})  BSE {m['bse_symbol']} {m['bse_scrip']} ({m['bse_series']})  {m['instrument_class']}")
+        else:
+            print(f"     {q:<10s} -> {rr.error.kind}: {rr.error.detail[:90]}")
+
+
 def group_shp(report: list, store: Store, sample: int) -> None:
     r = show(report, "shp_master", lambda: nse_shp.shp_master(store=store),
              lambda r: f"{len(r.data)} companies, newest covered quarter {r.as_of}")
@@ -174,7 +197,7 @@ def main(argv=None) -> int:
         for g in args.only or GROUPS:
             print(f"== {g}")
             {"archive": lambda: group_archive(report, store), "bse": lambda: group_bse(report, store),
-             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
+             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "master": lambda: group_master(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
             print()
         bad = [r["name"] for r in report if not r["ok"]]
         print(f"{len(report) - len(bad)} ok, {len(bad)} failed" + (f": {', '.join(bad)}" if bad else ""))
