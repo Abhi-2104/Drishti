@@ -9,6 +9,7 @@ dedupe_events. A pledge's "quantity" is the number of shares pledged, not a chan
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import date, datetime, timedelta
 from typing import Iterable
@@ -139,13 +140,19 @@ def _reconciles(ev: dict) -> bool | None:
     return (pre + q if ev["direction"] == "BUY" else pre - q) == post
 
 
+def event_key(e: dict) -> str:
+    """Stable identity of a trade across duplicate filings: (isin/symbol, person, direction, quantity, value, dates, mode)."""
+    raw = "|".join(str(x) for x in (e.get("isin") or e.get("symbol"), e["person"].upper(), e["direction"], e["quantity"], e["value_inr"],
+                                    e["from_date"], e["to_date"], e["mode"]))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
 def dedupe_events(events: Iterable[dict]) -> list[dict]:
-    """The same trade is sometimes filed twice (two appIds). Keep one per (isin/symbol, person, direction, quantity,
-    value, dates, mode); the one from the latest filing wins. Order of first appearance is preserved."""
-    best: dict[tuple, dict] = {}
+    """The same trade is sometimes filed twice (two appIds). Keep one per event_key; the one from the latest filing
+    wins. Order of first appearance is preserved."""
+    best: dict[str, dict] = {}
     for e in events:
-        key = (e.get("isin") or e.get("symbol"), e["person"].upper(), e["direction"], e["quantity"], e["value_inr"],
-               e["from_date"], e["to_date"], e["mode"])
+        key = event_key(e)
         cur = best.get(key)
         if cur is None or (e.get("filed_at") or "") > (cur.get("filed_at") or ""):
             best[key] = e

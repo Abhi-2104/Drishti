@@ -1,4 +1,4 @@
-"""drishti CLI: mcp | worker | run <job> | jobs."""
+"""drishti CLI: run <job> | jobs | health | resolve | init | paths  (mcp and worker are stubs until WP8)."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("worker", help="run the scheduler loop")
     run = sub.add_parser("run", help="run one job by hand")
     run.add_argument("job")
-    sub.add_parser("jobs", help="list jobs")
+    sub.add_parser("jobs", help="list jobs and their suggested schedule")
+    sub.add_parser("health", help="data freshness and the latest result of every job step")
     rv = sub.add_parser("resolve", help="look up a security by ISIN, NSE/BSE symbol or BSE scrip code")
     rv.add_argument("query")
     sub.add_parser("init", help="create the settings/profile templates (never overwrites)")
@@ -58,9 +59,49 @@ def main(argv: list[str] | None = None) -> int:
         for m in r.data["matches"]:
             print(f"{m['isin']}  {m['name']}  NSE:{m['nse_symbol'] or '-'}  BSE:{m['bse_symbol'] or '-'} {m['bse_scrip'] or ''}  [{m['instrument_class'] or '?'}]")
         return 3 if r.data["ambiguous"] else 0   # 3 = several companies matched: the caller must choose
-    if args.cmd == "run":
-        return _todo(f"run {args.job}")
+    if args.cmd == "jobs":
+        from .jobs import JOBS
+        for j in JOBS.values():
+            print(f"{j.name:<16s} {j.when:<16s} {j.doc}")
+            print(f"{'':<16s} steps: {', '.join(s.dataset for s in j.steps)}")
+        return 0
+    if args.cmd in ("run", "health"):
+        from .jobs import JOBS, run_job
+        from .store import Store
+        if args.cmd == "run" and args.job not in JOBS:
+            print(f"drishti run: unknown job {args.job!r}; known: {', '.join(JOBS)}", file=sys.stderr)
+            return 2
+        try:
+            cfg = load_settings()
+        except ConfigError as e:
+            print(f"drishti {args.cmd}: {e}", file=sys.stderr)
+            return 2
+        with Store(cfg.db_path) as st:
+            if args.cmd == "health":
+                return _print_health(st.data_health())
+            rep = run_job(st, args.job)
+        for s in rep.steps:
+            if s.ok:
+                print(f"OK   {s.dataset:<16s} {s.rows if s.rows is not None else '-':>6} rows  as of {s.as_of}  ({s.secs:.1f}s)" + (f"\n     note: {s.note}" if s.note else ""))
+            else:
+                print(f"FAIL {s.dataset:<16s} {s.error_kind}: {s.detail[:160]}  ({s.secs:.1f}s)")
+        print(f"{rep.job}: {sum(s.ok for s in rep.steps)}/{len(rep.steps)} steps ok")
+        return 0 if rep.ok else 1
     return _todo(args.cmd)
+
+
+def _print_health(h: dict) -> int:
+    print(f"status: {h['status']}  (generated {h['generated_at']})")
+    for d in h["datasets"]:
+        print(f"  data   {d['dataset']:<16s} latest {d['latest_trade_date'] or '-'}  fetched {d['last_fetched_at']}  days stored {d['days_stored']}")
+    for j in h["jobs"]:
+        flag = "OK  " if j["status"] == "ok" else j["status"].upper()
+        print(f"  job    {flag:<6s} {j['job']}.{j['dataset']}  as of {j['trade_date'] or '-'}  {j['error_kind'] or ''} {(j['detail'] or '')[:80]}")
+    for k in h["canaries"]:
+        print(f"  canary {'ok' if k['ok'] else 'FAIL':<5s} {k['name']}  newest {k['newest'] or '-'}  {k['error_kind'] or ''}")
+    if h["failures_24h"]:
+        print("  failures in the last 24h: " + ", ".join(f"{f['error_kind']} x{f['n']}" for f in h["failures_24h"]))
+    return 0 if h["status"] == "ok" else 1
 
 
 if __name__ == "__main__":

@@ -224,9 +224,11 @@ class Store:
         else:
             self._finish(run_id, "ok", None, "", h.rows, h.trade_date)
 
-    def log_result(self, job: str, result: Result, *, dataset: str | None = None, trade_date: date | str | None = None) -> None:
+    def log_result(self, job: str, result: Result, *, dataset: str | None = None, trade_date: date | str | None = None,
+                   rows: int | None = None) -> None:
         """Record a provider Result (ok or typed error) as one finished job step."""
-        rows = len(result.data) if hasattr(result.data, "__len__") and not isinstance(result.data, (str, bytes)) else None
+        if rows is None:
+            rows = len(result.data) if hasattr(result.data, "__len__") and not isinstance(result.data, (str, bytes, dict)) else None
         run_id = self._run("INSERT INTO job_log (job, dataset, trade_date, started_at, status) VALUES (?,?,?,?, 'running')",
                            (job, dataset, _day(trade_date or result.as_of) if (trade_date or result.as_of) else None, _ts())).lastrowid
         if result.ok:
