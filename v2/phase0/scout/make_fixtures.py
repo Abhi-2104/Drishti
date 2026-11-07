@@ -169,7 +169,19 @@ def group_shp() -> None:
     print(f"shp master: {len(out)} of {len(rows)} rows ({len(mine)} for the picked companies)")
 
 
-GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse, "pit": group_pit, "shp": group_shp}
+def group_macro() -> None:
+    """FII/DII cash flows, FRED (last 400 rows), CFTC TFF (whole file, 74KB: every row is checked by the parser)."""
+    for sub in ("nse_flows", "fred", "cftc"):
+        (ROOT / sub).mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(RAW / "nse_live" / "fiidiiTradeReact.json", ROOT / "nse_flows" / "fiidiiTradeReact.json")
+    for sid in ("DTWEXBGS", "WALCL"):
+        lines = (RAW / "fred" / f"{sid}.csv").read_text(encoding="utf-8").splitlines()
+        (ROOT / "fred" / f"{sid}.csv").write_text("\n".join([lines[0]] + lines[-400:]) + "\n", encoding="utf-8", newline="\n")
+    shutil.copyfile(RAW / "cftc" / "FinFutWk.txt", ROOT / "cftc" / "FinFutWk.txt")
+    print("macro: fiidii, fred x2 (400 rows), cftc FinFutWk")
+
+
+GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse, "pit": group_pit, "shp": group_shp, "macro": group_macro}
 
 
 def main() -> int:

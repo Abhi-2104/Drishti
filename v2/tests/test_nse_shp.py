@@ -330,8 +330,15 @@ def test_validate_live_runs_end_to_end_on_fakes(monkeypatch, tmp_path, capsys):
     ev = [{"direction": "BUY", "category": "Director", "holding_reconciles": True, "isin_valid": True, "form_version": "2.0"}]
     monkeypatch.setattr(vl.nse_pit, "insider_trades", lambda d: Result(
         data={"events": ev, "filings": 1, "failed": [], "duplicates_dropped": 0}, as_of="2026-11-07"))
+    monkeypatch.setattr(vl.nse_flows, "fii_dii_cash", lambda **k: Result(
+        data={"date": "2026-11-06", "fii": {"net": 1.0}, "dii": {"net": -1.0}}, as_of="2026-11-06"))
+    monkeypatch.setattr(vl.fred, "fred_series", lambda sid, **k: Result(
+        data={"n_total": 3, "latest": {"value": 1.5}}, as_of="2026-10-30"))
+    row = {"label": "USD index", "open_interest": 10, "lev_money": {"net": 5, "net_change": 1}, "asset_mgr": {"net": -5}}
+    monkeypatch.setattr(vl.cftc, "cftc_tff", lambda **k: Result(data=[row], as_of="2026-11-03"))
     assert vl.main(["--shp-sample", "3"]) == 0
     out = capsys.readouterr().out
+    assert "fii_dii_cash" in out and "cftc_tff" in out and "fred_WALCL" in out
     assert "OK   shp_master" in out and "shp_filings" in out and "insider_trades_7d" in out and "0 failed" in out
     assert json.loads((tmp_path / "out.json").read_text())["report"]
 
@@ -343,6 +350,7 @@ def test_validate_live_reports_failures_and_exits_nonzero(monkeypatch, tmp_path,
     rows = s.latest_filings(s.parse_shp_master(master()))
     monkeypatch.setattr(vl.nse_shp, "shp_master", lambda **k: Result(data=rows, as_of="2026-09-30"))
     monkeypatch.setattr(vl.nse_shp, "shp_filing", lambda url: Result(error=DrishtiError(ErrorKind.PARSE_FAIL, "no promoter context")))
+    monkeypatch.setattr(vl, "save_failure", lambda *a: "(not saved in tests)")   # never touch the network from a unit test
     assert vl.main(["--only", "shp", "--shp-sample", "3"]) == 1
     out = capsys.readouterr().out
     assert "FAIL shp_filings" in out and "no promoter context" in out

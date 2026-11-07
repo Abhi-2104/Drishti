@@ -19,12 +19,12 @@ from drishti.core.canary import today_ist
 from drishti.core.envelope import DrishtiError, Result
 from drishti.core.fetch import get
 from drishti.providers import _util as u
-from drishti.providers import bse, nse_archive, nse_pit, nse_shp
+from drishti.providers import bse, cftc, fred, nse_archive, nse_flows, nse_pit, nse_shp
 from drishti.providers.profiles import NSE_ARCHIVE
 from drishti.store import Store
 
 OUT = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "_raw" / "validate_live.json"
-GROUPS = ("archive", "bse", "pit", "shp")
+GROUPS = ("archive", "bse", "pit", "shp", "macro")
 
 
 def line(ok: bool, name: str, secs: float, detail: str) -> None:
@@ -100,7 +100,7 @@ def group_pit(report: list, store: Store) -> None:
     other = Counter(e["txn_type"] for e in ev if e["direction"] == "OTHER")
     if other:
         print(f"     direction OTHER, by transaction type: {dict(other.most_common(8))}")
-    bad_isin = [(e["symbol"], e["isin"]) for e in ev if not e["isin_valid"]]
+    bad_isin = [(e["symbol"], e.get("isin_raw")) for e in ev if not e["isin_valid"]]
     if bad_isin:
         print(f"     invalid ISIN in filings: {sorted(set(bad_isin))[:5]}")
     print(f"     holding_reconciles False: {sum(1 for e in ev if e['holding_reconciles'] is False)}; invalid ISIN: {sum(1 for e in ev if not e['isin_valid'])}; "
@@ -108,6 +108,18 @@ def group_pit(report: list, store: Store) -> None:
     for f in d["failed"][:8]:
         print(f"     FAILED filing {f['app_id']} {f['symbol']}: {f['kind']} {f['detail'][:100]}")
     report[-1]["failed_filings"] = d["failed"]
+
+
+def group_macro(report: list, store: Store) -> None:
+    r = show(report, "fii_dii_cash", lambda: nse_flows.fii_dii_cash(store=store),
+             lambda r: f"{r.data['date']}: FII net {r.data['fii']['net']:+,.0f} cr, DII net {r.data['dii']['net']:+,.0f} cr (provisional)")
+    for sid in fred.SERIES:
+        show(report, f"fred_{sid}", lambda sid=sid: fred.fred_series(sid, store=store),
+             lambda r: f"{r.data['n_total']} observations, latest {r.data['latest']['value']} on {r.as_of}")
+    r = show(report, "cftc_tff", lambda: cftc.cftc_tff(store=store), lambda r: f"{len(r.data)} watched contracts, positions as of {r.as_of}")
+    for x in (r.data or []):
+        print(f"     {x['label']:<16s} OI {x['open_interest']:>9,}  lev funds net {x['lev_money']['net']:>+10,} ({x['lev_money']['net_change']:+,})"
+              f"  asset mgrs net {x['asset_mgr']['net']:>+10,}")
 
 
 def group_shp(report: list, store: Store, sample: int) -> None:
@@ -162,7 +174,7 @@ def main(argv=None) -> int:
         for g in args.only or GROUPS:
             print(f"== {g}")
             {"archive": lambda: group_archive(report, store), "bse": lambda: group_bse(report, store),
-             "pit": lambda: group_pit(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
+             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
             print()
         bad = [r["name"] for r in report if not r["ok"]]
         print(f"{len(report) - len(bad)} ok, {len(bad)} failed" + (f": {', '.join(bad)}" if bad else ""))
