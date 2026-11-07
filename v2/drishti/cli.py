@@ -1,4 +1,4 @@
-"""drishti CLI: run <job> | jobs | health | resolve | init | paths  (mcp and worker are stubs until WP8)."""
+"""drishti CLI: run <job> | jobs | health | resolve | init | paths  (worker is a stub)."""
 from __future__ import annotations
 
 import argparse
@@ -59,6 +59,18 @@ def main(argv: list[str] | None = None) -> int:
         for m in r.data["matches"]:
             print(f"{m['isin']}  {m['name']}  NSE:{m['nse_symbol'] or '-'}  BSE:{m['bse_symbol'] or '-'} {m['bse_scrip'] or ''}  [{m['instrument_class'] or '?'}]")
         return 3 if r.data["ambiguous"] else 0   # 3 = several companies matched: the caller must choose
+    if args.cmd == "mcp":
+        try:
+            cfg = load_settings()
+            from .mcp_server import serve
+        except ConfigError as e:
+            print(f"drishti mcp: {e}", file=sys.stderr)
+            return 2
+        except ModuleNotFoundError as e:
+            print(f"drishti mcp: the MCP SDK is not installed ({e}); run `uv sync`", file=sys.stderr)
+            return 2
+        serve(cfg.db_path)    # stdout belongs to the protocol: everything else logs to stderr
+        return 0
     if args.cmd == "jobs":
         from .jobs import JOBS
         for j in JOBS.values():
