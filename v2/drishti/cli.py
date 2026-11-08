@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
-    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit")
     dc.add_argument("what")
     dc.add_argument("--gate", default=None)
     dc.add_argument("--start", default=None)
@@ -62,8 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--answers", default=None, help="import: JSON-lines answers file")
     dc.add_argument("--agent", default=None)
     dc.add_argument("--model", default=None)
-    dc.add_argument("--a", default=None, help="compare: first author, agent/model")
-    dc.add_argument("--b", default=None, help="compare: second author, agent/model")
+    dc.add_argument("--critiques", default=None, help="audit: critiques JSON-lines file")
+    dc.add_argument("--a", default=None, help="compare/audit: first author, agent/model")
+    dc.add_argument("--b", default=None, help="compare: second author; audit: the revised author (optional)")
     sub.add_parser("init", help="create the settings/profile templates (never overwrites)")
     sub.add_parser("paths", help="show where settings, profile and the database live")
     args = ap.parse_args(argv)
@@ -246,7 +247,15 @@ def _decisions(st, args, cfg) -> int:
             return 2
         print(_json.dumps(score.compare(rows, args.a, args.b, gate=args.gate), indent=1))
         return 0
-    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare", file=sys.stderr)
+    if w == "audit":
+        if not need(key=args.key, critiques=args.critiques, a=args.a):
+            return 2
+        from .decisions import audit as au
+        key = _json.loads(Path(args.key).read_text(encoding="utf-8"))
+        crit = {r["case_id"]: r for r in (_json.loads(x) for x in Path(args.critiques).read_text(encoding="utf-8").splitlines() if x.strip())}
+        print(_json.dumps(au.audit(st, key, crit, args.a, args.b), indent=1))
+        return 0
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit", file=sys.stderr)
     return 2
 
 

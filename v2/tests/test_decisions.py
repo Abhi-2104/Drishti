@@ -370,3 +370,22 @@ def test_cli_decisions_end_to_end(tmp_path, monkeypatch, capsys):
     assert "rules/rules-v1+" in out and "baseline/always-long" in out
     assert cli.main(["decisions", "cases", "--cases", str(cf)]) == 2          # missing --start/--end
     assert cli.main(["decisions", "nonsense"]) == 2
+
+
+# --- audit: did holding its ground pay? -------------------------------------------------------------------------
+def test_audit_counts_held_and_changed_cases_against_the_critics_suggestion(st):
+    from drishti.decisions import audit
+    up = call(st)                                                                   # claude ENTER on the riser: a winner
+    dn = call(st, isin=DOWN, action="ENTER")                                       # claude ENTER on the faller: a loser
+    call(st, isin=DOWN, action="AVOID", agent="claude+r", model="m1")             # revised: changed its mind on the faller
+    call(st, agent="claude+r", model="m1")                                         # revised: held on the riser
+    key = {"c1": {"gate": "entry", "as_of": AS_OF, "isin": UP}, "c2": {"gate": "entry", "as_of": AS_OF, "isin": DOWN},
+           "c3": {"gate": "entry", "as_of": AS_OF, "isin": "INE0NONE0001"}}
+    crit = {"c1": {"verdict": "weak", "suggested_action": "AVOID"}, "c2": {"verdict": "sound", "suggested_action": "AVOID"}, "c3": {"suggested_action": "WAIT"}}
+    a = audit.audit(st, key, crit, "claude/m1", "claude+r/m1")
+    assert a["scored_cases_with_critique"] == 2 and a["skipped"]["no_decision"] == 1
+    assert (a["author_calls"], a["author_calls_right"], a["critic_suggested_a_different_action"]) == (2, 1, 2)
+    assert a["author_held"]["n"] == 1 and a["author_held"]["author_better"] == 1 and a["author_held"]["critic_better"] == 0      # held on the riser: right
+    assert a["author_changed"]["n"] == 1 and a["author_changed"]["critic_better"] == 1                                            # the faller: the critic was right
+    assert a["critic_verdicts"] == {"weak": 1, "sound": 1}
+    assert audit.audit(st, key, {}, "claude/m1")["skipped"]["no_critique"] == 3
