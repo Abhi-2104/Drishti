@@ -78,7 +78,7 @@ def stock_points(store, isin: str, symbol: str | None, on) -> dict:
         unknown.append("insider_cluster")
     else:
         cited.append("insider_cluster")
-        fl = " ".join(ins["details"]["flags"])
+        fl = " ".join(ins["details"].get("flags", []))
         sell, buy = "selling cluster" in fl, "size buying" in fl
         if buy and not sell:
             add(sp["insider_buy"], "insider buying")
@@ -90,7 +90,7 @@ def stock_points(store, isin: str, symbol: str | None, on) -> dict:
         unknown.append("pledge")
     else:
         cited.append("pledge")
-        veto = any("strong caution" in f for f in pl["details"]["flags"])
+        veto = any("strong caution" in f for f in pl["details"].get("flags", []))
         if veto:
             parts.append({"points": 0, "why": "promoter pledge above the strong-caution level (veto on buying)"})
     mr = _ok(store, "macro_regime", on)
@@ -210,7 +210,7 @@ def decide_macro(store, on) -> dict | None:
             "signals_cited": cited, "points": votes}
 
 
-def run(store, gate: str, as_of: str, *, isin: str | None = None, symbol: str | None = None):
+def run(store, gate: str, as_of: str, *, isin: str | None = None, symbol: str | None = None, horizon_days: int | None = None):
     """Decide one case and append it to the log. Returns the log's Result; a case with too little data is a typed NOT_FOUND
     ('skipped'), never a made-up neutral."""
     from datetime import date
@@ -220,6 +220,6 @@ def run(store, gate: str, as_of: str, *, isin: str | None = None, symbol: str | 
     d = decide_macro(store, on) if gate == "macro" else decide_stock(store, gate, isin, symbol, on)
     if d is None:
         return Result(error=DrishtiError(ErrorKind.NOT_FOUND, f"{ver}: too little stored data to decide /{gate} {isin or 'MARKET'} on {as_of}"))
-    return log.record(store, gate=gate, as_of=as_of, action=d["action"], horizon_days=d["horizon_days"], thesis=d["thesis"], agent=AGENT,
+    return log.record(store, gate=gate, as_of=as_of, action=d["action"], horizon_days=horizon_days or d["horizon_days"], thesis=d["thesis"], agent=AGENT,
                       model=ver, signals_cited=d["signals_cited"], isin=isin, symbol=symbol, confidence=d["confidence"],
                       invalidation=d["invalidation"], notes=f"points={d['points']}")

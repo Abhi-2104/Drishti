@@ -83,7 +83,7 @@ def pledge(store, isin: str, on=None):
     pl = cur["pledged_pct_of_promoter"] or 0.0
     if cur["no_promoter"]:
         return ok(Signal("pledge", cur["as_on"], None, "no promoter (professionally managed): pledge not applicable",
-                         [Component("promoter holding", 0, cur["as_on"])], [], "", ver, details={"isin": isin}))
+                         [Component("promoter holding", 0, cur["as_on"])], [], "", ver, details={"isin": isin, "flags": [], "previous_as_on": None}))
     if pl > p["strong_caution_pledged_pct"]:
         flags.append(f">{p['strong_caution_pledged_pct']:.0f}% of promoter holding pledged (scoring.md: strong caution)")
     rise = None

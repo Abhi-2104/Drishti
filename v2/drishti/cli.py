@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
-    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward")
     dc.add_argument("what")
     dc.add_argument("--gate", default=None)
     dc.add_argument("--start", default=None)
@@ -62,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--answers", default=None, help="import: JSON-lines answers file")
     dc.add_argument("--agent", default=None)
     dc.add_argument("--model", default=None)
+    dc.add_argument("--universe", default=None, help="forward: the frozen stock list (default eval/forward_universe.json)")
+    dc.add_argument("--universe-size", type=int, default=20, help="forward: stocks drawn when the universe file is first made")
+    dc.add_argument("--horizons", default="20,60", help="forward: horizons in sessions, comma-separated")
+    dc.add_argument("--as-of", default=None, help="forward: decision date (default: the latest stored session)")
+    dc.add_argument("--min-gap", type=int, default=5, help="forward: least sessions between forward dates")
     dc.add_argument("--critiques", default=None, help="audit: critiques JSON-lines file")
     dc.add_argument("--a", default=None, help="compare/audit: first author, agent/model")
     dc.add_argument("--b", default=None, help="compare: second author; audit: the revised author (optional)")
@@ -255,7 +260,20 @@ def _decisions(st, args, cfg) -> int:
         crit = {r["case_id"]: r for r in (_json.loads(x) for x in Path(args.critiques).read_text(encoding="utf-8").splitlines() if x.strip())}
         print(_json.dumps(au.audit(st, key, crit, args.a, args.b), indent=1))
         return 0
-    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit", file=sys.stderr)
+    if w == "forward":
+        from .decisions import forward as fw
+        hz = tuple(int(x) for x in args.horizons.split(","))
+        prof = None
+        try:
+            from .profile import load_profile
+            prof = load_profile(cfg)
+        except Exception:
+            prof = None
+        r = fw.step(st, out_dir=Path(args.out or "eval/forward"), universe_path=Path(args.universe or "eval/forward_universe.json"), as_of=args.as_of,
+                    horizons=hz, size=args.universe_size, seed=args.seed, min_gap=args.min_gap, profile=prof)
+        print(_json.dumps(r, indent=1))
+        return 0 if r["done"] else 1
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward", file=sys.stderr)
     return 2
 
 

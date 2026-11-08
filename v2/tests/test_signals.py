@@ -490,3 +490,9 @@ def test_percentile_labels_when_history_exists(st):
     ds.persist_participant_oi(st, rows)
     s = market.participant_oi(st, date(2026, 11, 6)).data
     assert s["label"].startswith("strong bullish vs its own history") and "(v1 rule:" in s["label"]
+
+
+def test_pledge_without_a_promoter_still_reports_an_empty_flag_list(st):
+    shp(st, "INE202A01018", "2026-09-30", 0.0, promoter_shares=0)
+    s = disclosure.pledge(st, "INE202A01018", date(2026, 11, 8)).data
+    assert "not applicable" in s["label"] and s["details"]["flags"] == []

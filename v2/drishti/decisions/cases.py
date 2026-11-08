@@ -58,7 +58,7 @@ def run_rules(store, cases: list[dict]) -> dict:
     """Decide every case with rules-v1. Counts what was written, what had too little data, and what was already there."""
     n = {"recorded": 0, "skipped_too_little_data": 0, "already_logged": 0, "failed": 0}
     for c in cases:
-        r = rules.run(store, c["gate"], c["as_of"], isin=c["isin"], symbol=c["symbol"])
+        r = rules.run(store, c["gate"], c["as_of"], isin=c["isin"], symbol=c["symbol"], horizon_days=c.get("horizon_days"))
         if r.ok:
             n["recorded"] += 1
         elif r.error.kind == ErrorKind.NOT_FOUND:

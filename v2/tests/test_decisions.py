@@ -389,3 +389,26 @@ def test_audit_counts_held_and_changed_cases_against_the_critics_suggestion(st):
     assert a["author_changed"]["n"] == 1 and a["author_changed"]["critic_better"] == 1                                            # the faller: the critic was right
     assert a["critic_verdicts"] == {"weak": 1, "sound": 1}
     assert audit.audit(st, key, {}, "claude/m1")["skipped"]["no_critique"] == 3
+
+
+# --- forward log ------------------------------------------------------------------------------------------------
+def test_forward_step_freezes_the_universe_runs_rules_and_exports_blind_bundles(st, tmp_path):
+    from drishti.decisions import forward
+    up = tmp_path / "u.json"
+    r = forward.step(st, out_dir=tmp_path / "f", universe_path=up, as_of=AS_OF, size=2)
+    assert r["done"] and r["cases"] == 2 * (2 + 1) and r["bundles"] == r["cases"]          # 2 stocks + macro, at 2 horizons
+    u1 = up.read_text()
+    assert {c["horizon_days"] for c in log.current(st, agent="rules")} == {20, 60}
+    again = forward.step(st, out_dir=tmp_path / "f", universe_path=up, as_of=AS_OF, size=1)      # same date: idempotent, universe unchanged
+    assert again["done"] and up.read_text() == u1 and again["rules"]["recorded"] == 0 and again["rules"]["already_logged"] > 0
+    soon = forward.step(st, out_dir=tmp_path / "f", universe_path=up, as_of=DAYS[252])
+    assert not soon["done"] and "weekly" in soon["why"]
+    later = forward.step(st, out_dir=tmp_path / "f", universe_path=up, as_of=DAYS[256])
+    assert later["done"]
+    assert not forward.step(st, out_dir=tmp_path / "f", universe_path=up, as_of=DAYS[10])["done"]      # too little history
+    assert "RISER" not in " ".join(p.read_text() for p in (tmp_path / "f" / f"bundles-{AS_OF}").glob("case-*.json"))      # blind
+
+
+def test_rules_accept_a_per_case_horizon(st):
+    r = rules.run(st, "entry", AS_OF, isin=UP, symbol="RISER", horizon_days=20)
+    assert r.ok and r.data["horizon_days"] == 20

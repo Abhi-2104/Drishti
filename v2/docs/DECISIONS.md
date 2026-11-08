@@ -43,3 +43,16 @@ uv run drishti decisions score
 uv run drishti decisions compare --a claude/<model> --b rules/<rules version> --gate entry
 ```
 An answers line: `{"case_id": "case-00007", "action": "ENTER", "confidence": 0.62, "thesis": "...", "invalidation": "...", "signals": ["price_context"]}`.
+
+## Forward log (the clean test)
+
+Models may remember outcomes from before their training cutoff, so past-date tests are only a plumbing check. The forward log
+records calls on dates whose outcomes do not exist yet.
+
+    drishti decisions forward            # latest stored session, 20 fixed stocks + the market, horizons 20 and 60
+    # then run an author over eval/forward/bundles-<date> (scripts/run-authors.sh), and import with the key
+    # eval/forward/bundles-<date>_key.json. Score later with `drishti decisions score` once horizons have run.
+
+The universe is drawn once (seeded, from the 300 most liquid names) into `eval/forward_universe.json` and never changed.
+A run is refused if the last forward date is under 5 sessions earlier. Weekly dates with a 20/60-session horizon overlap, so
+read results by date block, not by case count. Prices must be refreshed first, or "latest session" is stale.
