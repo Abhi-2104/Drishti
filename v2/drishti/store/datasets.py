@@ -191,9 +191,26 @@ def persist_macro(store, series: str, rows: Iterable[dict], source: str) -> int:
                         ("series", "obs_date"))
 
 
+def derive_yoy(store, index_series: str, yoy_series: str, source: str = "derived") -> int:
+    """Year-on-year % for every month of an index series that also has the same month a year earlier (MoSPI publishes no WPI
+    inflation figure). Months without a year-earlier index get nothing, never a guess."""
+    ensure(store, "macro_series")
+    by = {r["obs_date"][:7]: r for r in store.query("SELECT obs_date, value FROM macro_series WHERE series=?", (index_series,))}
+    out = []
+    for ym, r in by.items():
+        prev = by.get(f"{int(ym[:4]) - 1}-{ym[5:7]}")
+        if prev and prev["value"]:
+            out.append({"date": r["obs_date"], "value": round((r["value"] / prev["value"] - 1) * 100, 2)})
+    return persist_macro(store, yoy_series, out, source) if out else 0
+
+
 def persist_macro_bundle(store, data: dict, source: str = "mospi") -> int:
-    """A provider result carrying `series: {name: [{date, value}]}` (MoSPI CPI / WPI / IIP / reserves): one macro_series write each."""
-    return sum(persist_macro(store, name, pts, source) for name, pts in (data.get("series") or {}).items() if pts)
+    """A provider result carrying `series: {name: [{date, value}]}` (MoSPI CPI / WPI / IIP / reserves): one macro_series write each.
+    A WPI index also refreshes the derived WPI year-on-year."""
+    n = sum(persist_macro(store, name, pts, source) for name, pts in (data.get("series") or {}).items() if pts)
+    if (data.get("series") or {}).get("mospi:wpi_index"):
+        derive_yoy(store, "mospi:wpi_index", "mospi:wpi_yoy", "mospi-derived")
+    return n
 
 
 def prune_incomplete(store, series: str, today: str) -> None:
@@ -555,6 +572,7 @@ def rebuild_adjustments(store, *, since: str | None = None) -> dict:
         if row["new_isin"]:
             successions.append({"exchange": exchange, "symbol": a["symbol"], "old_isin": row["isin"], "new_isin": row["new_isin"],
                                 "change_date": ex["trade_date"], "source": "action"})
+    _verify_combined(out)
     successions += _price_successions(store, lo)
     if since is None:
         store.delete_where("price_adjustment", "1=1", ())
@@ -570,6 +588,26 @@ def rebuild_adjustments(store, *, since: str | None = None) -> dict:
     ver = [x for x in out if x["verified"]]
     return {"events": len(ver), "unverified": [{k: x[k] for k in ("symbol", "ex_date", "kind", "reason")} for x in out if not x["verified"] and x["reason"]],
             "unparsed": unparsed, "successions": len(uniq), "checked": n, "since": since}
+
+
+def _verify_combined(rows: list[dict]) -> None:
+    """A split and a bonus can take effect on the same ex-date (a company announces both); the price then steps by the PRODUCT of the
+    two factors and neither action matches alone. When no action of such a pair is confirmed alone and the product matches the step,
+    every action of the pair is verified (each keeps its own factor, so applying them all applies the product). Same-kind pairs are
+    left alone: they collapse into one row and a duplicate listing would double-count."""
+    groups: dict[tuple, list[dict]] = {}
+    for r in rows:
+        if r["expected_factor"] and r["observed_ratio"]:
+            groups.setdefault((r["exchange"], r["symbol"], r["ex_date"]), []).append(r)
+    for g in groups.values():
+        if len(g) < 2 or len({r["kind"] for r in g}) != len(g) or any(r["verified"] for r in g):
+            continue
+        obs, prod = g[0]["observed_ratio"], math.prod(r["expected_factor"] for r in g)
+        d_exp, d_one = abs(math.log(obs / prod)), abs(math.log(obs))
+        if d_exp <= math.log(1 + ADJ_TOL) and d_exp < d_one:
+            for r in g:
+                r.update(verified=1, factor=r["expected_factor"],
+                         reason=f"verified with {len(g) - 1} other action(s) on the same ex-date: combined step {obs:.3f} matches {prod:g}")
 
 
 def _price_successions(store, lo: str) -> list[dict]:

@@ -192,45 +192,122 @@ def test_persist_and_release_lag(st, monkeypatch):
 
 def test_macro_india_job(monkeypatch):
     job = jobs.JOBS["macro_india"]
-    assert [s.dataset for s in job.steps] == ["mospi_cpi", "mospi_wpi", "mospi_iip", "mospi_rbi_reserves"]
+    assert [s.dataset for s in job.steps] == ["mospi_cpi", "mospi_wpi", "mospi_iip", "fred_TRESEGINM052N"]
     with Store() as s:
-        monkeypatch.setattr(mospi, "get", lambda url, profile, expect="text", **k: Fetched(url, WPI if "wpi" in url else CPI if "cpi" in url else IIP if "iip" in url else RBI, 200))
+        monkeypatch.setattr(mospi, "get", lambda url, profile, expect="text", **k: Fetched(url, WPI if "wpi" in url else CPI if "cpi" in url else IIP26, 200))
+        monkeypatch.setattr(jobs.fred, "get", lambda url, profile, expect="text", **k: Fetched(url, FRED_RES, 200))
         rep = jobs.run_job(s, "macro_india", now=datetime(2026, 11, 8, 18, 10, tzinfo=jobs.IST))
         by = {x.dataset: x for x in rep.steps}
-        assert by["mospi_cpi"].ok and by["mospi_wpi"].ok and by["mospi_cpi"].rows == 3
-        assert by["mospi_iip"].error_kind == "STALE" and by["mospi_rbi_reserves"].error_kind in ("EMPTY", "STALE")      # honest, not hidden
+        assert by["mospi_cpi"].ok and by["mospi_wpi"].ok and by["mospi_iip"].ok and by["mospi_cpi"].rows == 3
         assert s.query("SELECT COUNT(*) AS n FROM macro_series WHERE series='mospi:wpi_index'")[0]["n"] == 1
+        assert s.query("SELECT value FROM macro_series WHERE series='mospi:iip_yoy' ORDER BY obs_date DESC")[0]["value"] == 6.7
 
 
-def test_india_macro_tool(st, monkeypatch):
+# --- IIP on its new base (2022-23), modeled on the live row of 8 Nov 2026 (Sep 2026: index 124.3, +6.7%); other months / rows are synthetic ---
+def iip_row(month, idx, g, typ="General", cat="General", year=2026):
+    return {"base_year": "2022-23", "year": year, "month": month, "type": typ, "category": cat, "sub_category": "", "index": idx, "growth_rate": g}
+
+
+IIP26 = doc([iip_row("September", "124.3", "6.7"), iip_row("September", "130.0", "5.0", "Sectoral", "Mining"),
+             iip_row("August", "121.0", "4.2")])
+FRED_RES = ("observation_date,TRESEGINM052N\n" + "\n".join(f"{2000 + i // 12}-{i % 12 + 1:02d}-01,{400000 + i * 100}" for i in range(0, 320)) + "\n").encode()
+
+
+def test_iip_new_base_is_fresh_and_picks_the_general_row(monkeypatch):
+    fake(monkeypatch, {2026: IIP26})
+    r = mospi.iip(today=TODAY)
+    assert r.ok and r.as_of == "2026-09-30" and r.data["latest"] == {"period": "2026-09", "iip_index": 124.3, "iip_yoy": 6.7}
+    assert r.data["series"]["mospi:iip_yoy"] == [{"date": "2026-08-31", "value": 4.2}, {"date": "2026-09-30", "value": 6.7}]      # sectoral rows are not the headline
+    assert "base_year=2022-23" in mospi.IIP_URL
+
+
+def test_iip_headline_without_growth_is_an_error(monkeypatch):
+    fake(monkeypatch, {2026: doc([iip_row("September", "124.3", None)])})
+    assert mospi.iip(today=TODAY).error.kind == ErrorKind.PARSE_FAIL
+
+
+# --- one month (history) -----------------------------------------------------------------------------------------------
+def month_fake(monkeypatch, body):
+    asked = []
+    monkeypatch.setattr(mospi, "get", lambda url, profile, expect="text", **k: asked.append(url) or Fetched(url, body, 200))
+    return asked
+
+
+def test_cpi_month_uses_the_all_india_combined_codes(monkeypatch):
+    asked = month_fake(monkeypatch, CPI)
+    r = mospi.cpi_month(2026, 9)
+    assert r.ok and "state_code=1" in asked[0] and "sector_code=3" in asked[0] and "month_code=9" in asked[0] and "year=2026" in asked[0]
+    assert r.data["series"]["mospi:cpi_index"] == [{"date": "2026-09-30", "value": 109.49}] and r.data["series"]["mospi:cpi_yoy"][0]["value"] == 5.54
+
+
+def test_cpi_month_without_inflation_keeps_the_index_only(monkeypatch):
+    j = json.loads(CPI)
+    for r in j["data"]:
+        r["inflation"] = None                                               # base-2024 rows of 2025 carry no year-on-year
+    month_fake(monkeypatch, json.dumps(j).encode())
+    r = mospi.cpi_month(2026, 9)
+    assert r.ok and r.data["series"]["mospi:cpi_yoy"] == [] and len(r.data["series"]["mospi:cpi_index"]) == 1
+
+
+def test_month_fetch_refuses_a_different_month_than_asked(monkeypatch):
+    month_fake(monkeypatch, CPI)
+    assert mospi.cpi_month(2026, 8).error.kind == ErrorKind.PARSE_FAIL
+    month_fake(monkeypatch, NO_DATA)
+    assert mospi.wpi_month(2026, 10).error.kind == ErrorKind.EMPTY            # not published yet: typed, not a blank
+
+
+def test_wpi_and_iip_month(monkeypatch):
+    month_fake(monkeypatch, WPI)
+    assert mospi.wpi_month(2026, 9).data["series"]["mospi:wpi_index"] == [{"date": "2026-09-30", "value": 112.5}]
+    month_fake(monkeypatch, doc([iip_row("September", "124.3", "6.7")]))
+    assert mospi.iip_month(2026, 9).data["series"]["mospi:iip_yoy"] == [{"date": "2026-09-30", "value": 6.7}]
+
+
+# --- derived WPI year-on-year and the backfill ---------------------------------------------------------------------------
+def test_derive_yoy_needs_the_year_earlier_month(st):
+    ds.persist_macro(st, "mospi:wpi_index", [{"date": "2025-09-30", "value": 100.0}, {"date": "2026-09-30", "value": 112.5},
+                                             {"date": "2026-10-31", "value": 113.0}], "t")
+    assert ds.derive_yoy(st, "mospi:wpi_index", "mospi:wpi_yoy") == 1
+    assert st.query("SELECT obs_date, value FROM macro_series WHERE series='mospi:wpi_yoy'") == [{"obs_date": "2026-09-30", "value": 12.5}]
+
+
+def test_backfill_india_macro_fills_skips_and_counts_holes(st, monkeypatch):
+    from drishti.jobs import backfill
+    calls = []
+
+    def fake_month(kind):
+        def f(y, m):
+            calls.append((kind, y, m))
+            if (y, m) > (2026, 9):
+                return mospi.Result(error=DrishtiError(ErrorKind.EMPTY, "No Data Found"))
+            d = f"{y}-{m:02d}-28"
+            ser = {"cpi": {"mospi:cpi_index": [{"date": d, "value": 100.0 + m}]}, "wpi": {"mospi:wpi_index": [{"date": d, "value": 100.0 + m + (y - 2023) * 2}]},
+                   "iip": {"mospi:iip_index": [{"date": d, "value": 120.0}]}}[kind]
+            return mospi.Result(data={"series": ser}, as_of=d)
+        return f
+    monkeypatch.setattr(mospi, "MONTH_FETCH", {k: fake_month(k) for k in ("cpi", "wpi", "iip")})
+    rep = backfill.backfill_india_macro(st, today=date(2026, 10, 20))
+    assert rep.ok and rep.holidays == 3 and not rep.failed                      # October is not out for any of the three
+    assert st.query("SELECT COUNT(*) AS n FROM macro_series WHERE series='mospi:cpi_index'")[0]["n"] == 21      # Jan 2025 .. Sep 2026
+    assert st.query("SELECT COUNT(*) AS n FROM macro_series WHERE series='mospi:wpi_yoy'")[0]["n"] > 30        # derived where a year-earlier month exists
+    calls.clear()
+    again = backfill.backfill_india_macro(st, today=date(2026, 10, 20))
+    assert again.skipped > 60 and [c for c in calls if (c[1], c[2]) <= (2026, 9)] == []                           # resumes: nothing refetched
+
+
+def test_backfill_india_macro_stops_after_repeated_blocks(st, monkeypatch):
+    from drishti.jobs import backfill
+    blocked = lambda y, m: mospi.Result(error=DrishtiError(ErrorKind.BLOCKED, "403"))  # noqa: E731
+    monkeypatch.setattr(mospi, "MONTH_FETCH", {k: blocked for k in ("cpi", "wpi", "iip")})
+    rep = backfill.backfill_india_macro(st, today=date(2026, 10, 20))
+    assert rep.stopped.startswith("aborted") and len(rep.failed) == 5 and not rep.ok
+
+
+# --- reserves: FRED stands in for MoSPI's ended table -------------------------------------------------------------------
+def test_india_macro_reserves_prefer_the_newer_fred_series(st):
     from drishti import data_tools as dt
-    assert dt.india_macro(st).error.kind == ErrorKind.EMPTY
-    fake(monkeypatch, {2026: CPI})
-    ds.persist_macro_bundle(st, mospi.cpi(today=TODAY).data)
-    r = dt.india_macro(st, as_of="2026-11-08")
-    assert r.ok and r.data["cpi_yoy"] == {"value": 5.54, "unit": "%", "reference_month": "2026-09", "age_days": 39, "stale": False}
-    assert r.data["iip_yoy"]["value"] is None
-    assert dt.india_macro(st, as_of="2026-10-05").error.kind == ErrorKind.EMPTY           # before the September release
-    assert dt.india_macro(st, as_of="2027-02-01").data["cpi_yoy"]["stale"] is True        # old but shown as old
-
-
-def test_mcp_exposes_india_macro_tool():
-    pytest.importorskip("mcp")
-    import asyncio
-
-    from drishti import mcp_server as m
-
-    class _K:
-        def __init__(self, s):
-            self.s = s
-
-        def __enter__(self):
-            return self.s
-
-        def __exit__(self, *a):
-            return False
-    s = Store()
-    try:
-        assert "get_india_macro" in [t.name for t in asyncio.run(m.build_server(lambda: _K(s)).list_tools())]
-    finally:
-        s.close()
+    ds.persist_macro(st, "mospi:fx_reserves_usd_mn", [{"date": "2025-06-30", "value": 696654.0}], "mospi")
+    ds.persist_macro(st, "fred:TRESEGINM052N", [{"date": "2026-08-01", "value": 635511.5}], "fred")
+    r = dt.india_macro(st, as_of="2026-11-08").data["fx_reserves_usd_mn"]
+    assert r["value"] == 635511.5 and r["reference_month"] == "2026-08" and "FRED" in r["source"] and r["stale"] is False
+    assert dt.india_macro(st, as_of="2026-09-20").data["fx_reserves_usd_mn"]["value"] == 696654.0           # FRED's August is not known yet

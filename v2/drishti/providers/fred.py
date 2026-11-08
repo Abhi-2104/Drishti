@@ -21,6 +21,7 @@ SERIES: dict[str, int] = {
     "DTWEXBGS": 14,  # Nominal Broad US Dollar Index, daily, published with about a week's lag      (verified 7 Nov)
     "WALCL": 12,     # Fed total assets (Wednesday level), weekly                                   (verified 7 Nov)
     # Not yet verified live; windows are from FRED's published cadence and get confirmed on the first real run.
+    "TRESEGINM052N": 130,  # India total reserves incl. gold, USD, monthly (IMF via FRED), dated the 1st; ~2 months' lag (verified 8 Nov: newest 2026-08-01)
     "M2SL": 75,          # US M2, monthly, released ~4 weeks after month end
     "BAMLH0A0HYM2": 7,   # ICE BofA US high-yield option-adjusted spread, daily
     "T10Y2Y": 7,         # 10Y minus 2Y Treasury, daily

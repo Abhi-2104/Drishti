@@ -13,7 +13,7 @@ from typing import Callable
 
 from ..core.canary import today_ist
 from ..core.envelope import DrishtiError, ErrorKind, Result
-from ..providers import bse, fred, nse_archive, nse_corp, nse_pit, nse_shp, yahoo
+from ..providers import bse, fred, mospi, nse_archive, nse_corp, nse_pit, nse_shp, yahoo
 from ..store import Store
 from ..store import datasets as ds
 
@@ -365,9 +365,54 @@ def backfill_deals(store, *, days=365, window=30, kinds=COMPLETE_HISTORY_KINDS, 
     return rep
 
 
+# first month each MoSPI series can be asked for: CPI base 2024 starts Jan 2025, WPI base 2022-23 has 2023 onward, IIP 2022-23 from 2024
+INDIA_START = {"cpi": (2025, 1), "wpi": (2023, 1), "iip": (2024, 1)}
+
+
+def backfill_india_macro(store, *, budget_s=1800, today=None, clock=time.monotonic, progress=_noop, **_):
+    """Monthly CPI, WPI and IIP history from MoSPI, newest month first, one request per month. A month already stored is skipped;
+    a month not published yet (No Data Found) is counted as a hole, not a failure. WPI year-on-year is derived at the end."""
+    ds.ensure(store, "macro_series")
+    rep = BackfillReport("india_macro")
+    today = today or today_ist()
+    t0, fails = clock(), 0
+    for kind, (y0, m0) in INDIA_START.items():
+        have = {r["d"][:7] for r in store.query("SELECT obs_date AS d FROM macro_series WHERE series=?", (mospi.SERIES[f"{kind}_index"],))}
+        y, m = today.year, today.month
+        while (y, m) >= (y0, m0):
+            ym = f"{y}-{m:02d}"
+            if ym in have:
+                rep.skipped += 1
+            elif clock() - t0 > budget_s:
+                rep.stopped = f"time budget reached at {kind} {ym}; run again to continue"
+                return rep
+            else:
+                r = mospi.MONTH_FETCH[kind](y, m)
+                if r.ok:
+                    rep.done += 1
+                    rep.rows += ds.persist_macro_bundle(store, r.data)
+                    rep.oldest, rep.newest = min(rep.oldest or ym, ym), max(rep.newest or ym, ym)
+                    fails = 0
+                elif r.error.kind == ErrorKind.EMPTY:
+                    rep.holidays += 1          # not published (yet) or outside the series: a hole, not a failure
+                else:
+                    fails += 1
+                    rep.failed.append({"date": ym, "kind": str(r.error.kind), "detail": f"{kind}: {r.error.detail[:150]}"})
+                    if fails >= MAX_CONSECUTIVE_FAILURES:
+                        rep.stopped = f"aborted after {fails} failures in a row ({r.error.kind}); what was fetched is kept"
+                        return rep
+            m -= 1
+            if m == 0:
+                y, m = y - 1, 12
+        progress(f"   ...india_macro {kind}: done to {y0}-{m0:02d} ({clock() - t0:.0f}s)")
+    ds.derive_yoy(store, "mospi:wpi_index", "mospi:wpi_yoy", "mospi-derived")
+    return rep
+
+
 TARGETS = {
     "index_closes": backfill_index_closes, "participant_oi": backfill_participant_oi, "fo_index": backfill_fo_index,
     "prices": backfill_prices, "macro": backfill_macro, "insider": backfill_insider, "shp": backfill_shp, "deals": backfill_deals,
     "corp_actions": backfill_corp_actions, "adjustments": backfill_adjustments, "delivery": backfill_delivery,
+    "india_macro": backfill_india_macro,
 }
 DEFAULT_DAYS = {"prices": 380, "index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180, "deals": 365, "corp_actions": 730}

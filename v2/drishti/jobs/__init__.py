@@ -176,6 +176,7 @@ def _expiry_step(sym: str) -> Step:
 
 DAILY_FRED = ("DTWEXBGS", "DGS10", "DCOILBRENTEU", "DEXINUS", "VIXCLS", "BAMLH0A0HYM2", "T10Y2Y")
 WEEKLY_FRED = ("WALCL", "M2SL")
+MONTHLY_FRED = ("TRESEGINM052N",)       # India total reserves (the MoSPI reserves table stopped in June 2025)
 
 STEPS = {
     "cm_bhavcopy": Step("cm_bhavcopy", _latest(nse_archive.cm_bhavcopy), persist=lambda st, r: ds.persist_prices(st, r.data, "NSE"), daily=True),
@@ -208,7 +209,7 @@ STEPS = {
     "market_status": Step("market_status", lambda s, t: nse_corp.market_status(today=t), persist=_p(ds.persist_gift), count=lambda r: 1),
     "fii_dii_cash": Step("fii_dii_cash", lambda s, t: nse_flows.fii_dii_cash(store=s, today=t), persist=_p(ds.persist_fii_dii),
                          count=lambda r: 2),
-    **{f"fred_{x}": _fred(x) for x in DAILY_FRED + WEEKLY_FRED},
+    **{f"fred_{x}": _fred(x) for x in DAILY_FRED + WEEKLY_FRED + MONTHLY_FRED},
     **{f"yahoo_{x}": _yahoo(x) for x in yahoo.SYMBOLS},
     **{f"mospi_{k}": Step(f"mospi_{k}", lambda s, t, f=getattr(mospi, k): f(today=t), persist=lambda st, r: ds.persist_macro_bundle(st, r.data),
                           count=lambda r: sum(len(v) for v in r.data["series"].values())) for k in ("cpi", "wpi", "iip", "rbi_reserves")},
@@ -239,8 +240,9 @@ JOBS: dict[str, Job] = {j.name: j for j in (
     Job("macro_daily", "07:15", "Regime inputs: Yahoo DXY/US10Y/Brent/USD-INR/VIX and FRED daily series",
         tuple(STEPS[f"yahoo_{x}"] for x in yahoo.SYMBOLS) + tuple(STEPS[f"fred_{x}"] for x in DAILY_FRED)),
     Job("us_daily", "07:20", "Daily bars for every tracked US ticker (any ticker looked up once)", (STEPS["us_daily"],)),
-    Job("macro_india", "18:10", "India CPI, WPI, IIP and RBI reserves from MoSPI (monthly releases; a stale series is reported, not reused)",
-        tuple(STEPS[f"mospi_{k}"] for k in ("cpi", "wpi", "iip", "rbi_reserves"))),
+    Job("macro_india", "18:10", "India CPI, WPI and IIP from MoSPI, RBI reserves from FRED (MoSPI's reserves table ended June 2025; "
+        "a stale series is reported, not reused)",
+        tuple(STEPS[f"mospi_{k}"] for k in ("cpi", "wpi", "iip")) + tuple(STEPS[f"fred_{x}"] for x in MONTHLY_FRED)),
     Job("macro_weekly", "Sat 10:00", "Fed balance sheet, US M2, CFTC positioning",
         tuple(STEPS[f"fred_{x}"] for x in WEEKLY_FRED) + (STEPS["cftc_tff"],)),
     Job("shp_master", "07:45", "Shareholding-pattern master: promoter holding per company with QoQ change", (STEPS["shp_master"],)),

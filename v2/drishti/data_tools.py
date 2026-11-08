@@ -167,11 +167,17 @@ def india_macro(store, *, as_of: str | None = None) -> Result:
     day = as_of or today_ist().isoformat()
     spec = {"cpi_yoy": ("cpi", "cpi_release_lag_days", "%"), "cpi_food_yoy": ("cpi", "cpi_release_lag_days", "%"),
             "cpi_index": ("cpi", "cpi_release_lag_days", ""), "wpi_index": ("wpi", "wpi_release_lag_days", ""),
+            "wpi_yoy": ("wpi", "wpi_release_lag_days", "%"),
             "iip_yoy": ("iip", "iip_release_lag_days", "%"), "iip_index": ("iip", "iip_release_lag_days", ""),
             "fx_reserves_usd_mn": ("rbi_reserves", "reserves_release_lag_days", "US$ mn")}
     out, any_found = {}, False
     for name, (kind, lag, unit) in spec.items():
         pts = hist.macro_released(store, f"mospi:{name}", day, p[lag], 1)
+        src = "mospi"
+        if name == "fx_reserves_usd_mn":       # MoSPI's table ended in June 2025: FRED's monthly India reserves (IMF) stand in when newer
+            alt = hist.macro_released(store, "fred:TRESEGINM052N", day, p["fred_reserves_release_lag_days"], 1)
+            if alt and (not pts or alt[0][0] > pts[0][0]):
+                pts, src = alt, "FRED TRESEGINM052N (IMF, incl. gold)"
         if not pts:
             out[name] = {"value": None, "note": "nothing stored or published yet"}
             continue
@@ -179,6 +185,8 @@ def india_macro(store, *, as_of: str | None = None) -> Result:
         obs, val = pts[0]
         age = (date.fromisoformat(day) - date.fromisoformat(obs)).days
         out[name] = {"value": val, "unit": unit, "reference_month": obs[:7], "age_days": age, "stale": age > mospi.MAX_AGE[kind]}
+        if src != "mospi":
+            out[name]["source"] = src
     if not any_found:
         raise DrishtiError(ErrorKind.EMPTY, "no India macro stored; run `drishti run macro_india`")
     return Result(data=out, as_of=day)

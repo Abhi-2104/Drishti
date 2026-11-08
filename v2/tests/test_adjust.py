@@ -125,6 +125,34 @@ def test_an_action_the_prices_do_not_confirm_is_kept_but_not_applied(st):
     assert row["verified"] == 0 and row["factor"] is None and row["expected_factor"] == pytest.approx(0.2)
 
 
+def test_a_split_and_a_bonus_on_the_same_day_are_verified_together(st):
+    days = sessions(30)
+    put(st, split_history(days, 20, 10.0, old=OLD, new=OLD))                   # 1:1 bonus (0.5) and 5 -> 1 split (0.2): the price steps by 0.1
+    ds.persist_corp_actions(st, [action("KMEW", days[20], "Bonus 1:1", "bonus"), action("KMEW", days[20], SPLIT_5_TO_1, "split")])
+    r = ds.rebuild_adjustments(st)
+    assert r["events"] == 2 and r["unverified"] == []
+    ev = ds.adjustments_for(st, OLD)
+    assert sorted(round(e["factor"], 3) for e in ev) == [0.2, 0.5] and "combined step" in st.query("SELECT reason FROM price_adjustment WHERE verified=1")[0]["reason"]
+    raw = split_history(days, 20, 10.0, old=OLD, new=OLD)
+    adj, used = price.adjust(raw, ev)
+    assert len(used) == 2 and adj[19]["close"] == pytest.approx(raw[19]["close"] * 0.1) and adj[20]["close"] == raw[20]["close"]     # both factors, i.e. the product
+
+
+def test_a_pair_whose_product_does_not_match_stays_unverified(st):
+    days = sessions(30)
+    put(st, split_history(days, 20, 1.01, old=OLD, new=OLD))
+    ds.persist_corp_actions(st, [action("KMEW", days[20], "Bonus 1:1", "bonus"), action("KMEW", days[20], SPLIT_5_TO_1, "split")])
+    assert ds.rebuild_adjustments(st)["events"] == 0
+
+
+def test_a_pair_with_one_action_confirmed_alone_is_not_upgraded(st):
+    days = sessions(30)
+    put(st, split_history(days, 20, 2.0, old=OLD, new=OLD))                    # the price took only the bonus
+    ds.persist_corp_actions(st, [action("KMEW", days[20], "Bonus 1:1", "bonus"), action("KMEW", days[20], SPLIT_5_TO_1, "split")])
+    r = ds.rebuild_adjustments(st)
+    assert r["events"] == 1 and [e["kind"] for e in ds.adjustments_for(st, OLD)] == ["bonus"] and len(r["unverified"]) == 1
+
+
 def test_a_small_expected_factor_needs_a_step_nearer_to_it_than_to_no_change(st):
     days = sessions(30)
     put(st, split_history(days, 20, 1.01, old=OLD, new=OLD))                   # bonus 1:9 expects 0.9; the price barely moved

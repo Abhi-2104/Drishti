@@ -26,7 +26,12 @@ SOURCE = "mospi"
 BASE = "https://api.mospi.gov.in/api"
 CPI_URL = BASE + "/cpi/getCPIData?base_year=2024&series=Current&year={year}&limit=100&Format=JSON"
 WPI_URL = BASE + "/wpi/getWpiRecords?base_year=2022-23&year={year}&limit=100&Format=JSON"
-IIP_URL = BASE + "/iip/getIipData?base_year=2011-12&frequency=Monthly&year={year}&type=General&limit=100&Format=JSON"
+# IIP was rebased: base 2011-12 stops at March 2026, base 2022-23 runs to the latest month (confirmed 8 Nov 2026: Sep 2026 index 124.3, +6.7%).
+IIP_URL = BASE + "/iip/getIipData?base_year=2022-23&frequency=Monthly&year={year}&limit=100&Format=JSON"
+# One reference month, for history. CPI: All India + Combined only (the codes are MoSPI's own: state_code 1 = All India, sector_code 3 = Combined).
+CPI_MONTH_URL = BASE + "/cpi/getCPIData?base_year=2024&series=Current&year={year}&month_code={month}&state_code=1&sector_code=3&limit=100&Format=JSON"
+WPI_MONTH_URL = BASE + "/wpi/getWpiRecords?base_year=2022-23&year={year}&month_code={month}&limit=100&Format=JSON"
+IIP_MONTH_URL = BASE + "/iip/getIipData?base_year=2022-23&frequency=Monthly&year={year}&month_code={month}&limit=100&Format=JSON"
 RBI_URL = BASE + "/rbi/getRbiRecords?sub_indicator_code=47&year={year}&limit=100&Format=JSON"
 
 # max age (calendar days) of the newest reference-month END. CPI comes out about the 12th of the next month, WPI the 14th, IIP the 28th.
@@ -35,7 +40,7 @@ MONTHS = {m: i for i, m in enumerate(calendar.month_name) if m}
 
 SERIES = {
     "cpi_index": "mospi:cpi_index", "cpi_yoy": "mospi:cpi_yoy", "cpi_food_yoy": "mospi:cpi_food_yoy",
-    "wpi_index": "mospi:wpi_index", "iip_index": "mospi:iip_index", "iip_yoy": "mospi:iip_yoy",
+    "wpi_index": "mospi:wpi_index", "wpi_yoy": "mospi:wpi_yoy", "iip_index": "mospi:iip_index", "iip_yoy": "mospi:iip_yoy",
     "fx_reserves_usd_mn": "mospi:fx_reserves_usd_mn",
 }
 
@@ -217,6 +222,8 @@ def iip(*, today: date | None = None) -> Result:
     got, rows = _fetch_year(IIP_URL, "iip", parse_iip, today)
     gen = sorted((r for r in rows if r["type"] == "General" and r["category"] == "General" and not r["sub_category"]), key=lambda r: r["period"])
     h = iip_headline(rows)
+    if h["growth"] is None:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"mospi_iip: the {h['period']} headline carries no growth figure")
     series = {SERIES["iip_index"]: [{"date": r["obs_date"], "value": r["index"]} for r in gen if r["index"] is not None],
               SERIES["iip_yoy"]: [{"date": r["obs_date"], "value": r["growth"]} for r in gen if r["growth"] is not None]}
     return _result("iip", got, {"period": h["period"], "iip_index": h["index"], "iip_yoy": h["growth"]}, series, today, h["obs_date"])
@@ -230,3 +237,55 @@ def rbi_reserves(*, today: date | None = None) -> Result:
     h = reserves_headline(rows)
     return _result("rbi_reserves", got, {"period": h["period"], "fx_reserves_usd_mn": h["value"]},
                    {SERIES["fx_reserves_usd_mn"]: [{"date": r["obs_date"], "value": r["value"]} for r in tot]}, today, h["obs_date"])
+
+
+# --- one month (history backfill): no freshness check, but the month returned must be the month asked for ----
+def _month_rows(url: str, parse, year: int, mon: int, label: str):
+    got = get(url.format(year=year, month=mon), MOSPI, expect="json")
+    rows = parse(got.body)
+    want = f"{year}-{mon:02d}"
+    other = {r["period"] for r in rows} - {want}
+    if other:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: asked for {want}, got rows for {sorted(other)[:3]}")
+    return got, rows
+
+
+def _pts(series: str, date_: str, value) -> list[dict]:
+    return [{"date": date_, "value": value}] if value is not None else []
+
+
+@guard
+def cpi_month(year: int, mon: int) -> Result:
+    got, rows = _month_rows(CPI_MONTH_URL, parse_cpi, year, mon, "mospi_cpi_month")
+    g = _pick([r for r in rows if r["state"] == "All India"], "mospi_cpi_month", sector="Combined", division="CPI (General)")
+    food = _pick([r for r in rows if r["state"] == "All India"], "mospi_cpi_month", sector="Combined", division="Food and beverages")
+    d = g["obs_date"]
+    series = {SERIES["cpi_index"]: _pts("", d, g["index"]), SERIES["cpi_yoy"]: _pts("", d, g["inflation"]),
+              SERIES["cpi_food_yoy"]: _pts("", d, food["inflation"])}
+    if g["index"] is None:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"mospi_cpi_month: {g['period']} headline carries no index")
+    return Result(data={"period": g["period"], "series": series}, as_of=d, sources=[got.source(SOURCE)])
+
+
+@guard
+def wpi_month(year: int, mon: int) -> Result:
+    got, rows = _month_rows(WPI_MONTH_URL, parse_wpi, year, mon, "mospi_wpi_month")
+    h = wpi_headline(rows)
+    if h["index"] is None:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"mospi_wpi_month: {h['period']} headline carries no index")
+    return Result(data={"period": h["period"], "series": {SERIES["wpi_index"]: _pts("", h["obs_date"], h["index"])}}, as_of=h["obs_date"],
+                  sources=[got.source(SOURCE)])
+
+
+@guard
+def iip_month(year: int, mon: int) -> Result:
+    got, rows = _month_rows(IIP_MONTH_URL, parse_iip, year, mon, "mospi_iip_month")
+    h = iip_headline(rows)
+    if h["index"] is None:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"mospi_iip_month: {h['period']} headline carries no index")
+    return Result(data={"period": h["period"], "series": {SERIES["iip_index"]: _pts("", h["obs_date"], h["index"]),
+                                                          SERIES["iip_yoy"]: _pts("", h["obs_date"], h["growth"])}},
+                  as_of=h["obs_date"], sources=[got.source(SOURCE)])
+
+
+MONTH_FETCH = {"cpi": cpi_month, "wpi": wpi_month, "iip": iip_month}

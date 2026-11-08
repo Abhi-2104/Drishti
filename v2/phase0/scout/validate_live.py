@@ -369,6 +369,13 @@ def group_batch5(report: list, store: Store) -> None:
     show(report, "delivery_latest", lambda: pu.latest(lambda d: nse_archive.delivery(d), today_ist(), sessions=None),
          lambda r: f"{len(r.data)} rows for {r.as_of}; RELIANCE {[x['deliv_per'] for x in r.data if x['symbol'] == 'RELIANCE']}")
     show(report, "bse_scrip_list", lambda: bse.scrip_list(), lambda r: f"{len(r.data)} active scrips")
+    from drishti import data_tools as dt
+    from drishti.config import load_settings
+    with Store(load_settings().db_path) as real:           # what the macro_india job / `backfill india_macro` have stored so far
+        for ser in ("cpi_index", "cpi_yoy", "wpi_index", "wpi_yoy", "iip_index", "iip_yoy"):
+            n = real.query("SELECT COUNT(*) AS n, MIN(obs_date) AS a, MAX(obs_date) AS b FROM macro_series WHERE series=?", (f"mospi:{ser}",))[0]
+            print(f"     stored mospi:{ser:<10} {n['n']:>3} months {n['a']}..{n['b']}")
+        show(report, "india_macro_tool", lambda: dt.india_macro(real), lambda r: json.dumps({k: (v.get("value"), v.get("reference_month")) for k, v in r.data.items()}))
 
 
 def group_adjust(report: list, store: Store) -> None:
@@ -391,7 +398,7 @@ def group_adjust(report: list, store: Store) -> None:
         for e in ev:
             print(f"     ok   {e['ex_date']} {e['symbol']:<12s} {e['kind']:<6s} x{e['factor']:<8g} observed {e['observed_ratio']:<8g} "
                   f"{e['isin']}{' -> ' + e['new_isin'] if e['new_isin'] else ''}")
-        for x in sorted(r["unverified"], key=lambda x: x["ex_date"], reverse=True)[:12]:
+        for x in sorted(r["unverified"], key=lambda x: x["ex_date"], reverse=True):
             print(f"     NOT CONFIRMED {x['ex_date']} {x['symbol']:<12s} {x['kind']:<6s} {x['reason']}")
         for x in r["unparsed"][:8]:
             print(f"     UNREADABLE {x['ex_date']} {x['symbol']:<12s} {x['subject'][:80]}")

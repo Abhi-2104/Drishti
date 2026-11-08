@@ -104,5 +104,6 @@ rising_min_pp = 1.0                 # provisional: rise of this many points QoQ 
 cpi_release_lag_days = 12            # CPI for month M comes out around the 12th of M+1 (provisional: confirm against the MoSPI release calendar)
 wpi_release_lag_days = 14            # WPI around the 14th of M+1
 iip_release_lag_days = 28            # IIP around the 28th of M+1
+fred_reserves_release_lag_days = 60     # FRED/IMF India reserves are dated the 1st of the month and appear about two months later
 reserves_release_lag_days = 45       # MoSPI's monthly RBI reserves table: cadence unverified, deliberately slow
 provisional = true
