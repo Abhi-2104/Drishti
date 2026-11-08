@@ -199,3 +199,75 @@ def fpi_flows(store, *, days: int = 10) -> Result:
     eq = [x["equity_net_cr"] for x in out if x["equity_net_cr"] is not None]
     return Result(data={"days": out, "equity_net_sum_cr": round(sum(eq), 2) if eq else None, "source": "NSDL (confirmed)"},
                   as_of=dates[0])
+
+
+# --- US (SEC EDGAR + Yahoo) ---------------------------------------------------------------------------------------
+def _ua():
+    from .config import load_settings
+    return load_settings().sec_user_agent
+
+
+def _us_cik(store, ticker: str) -> int:
+    from .providers import sec
+    cik = ds.us_cik(store, ticker)
+    if cik is None:
+        r = sec.tickers(user_agent=_ua())
+        if not r.ok:
+            raise r.error
+        ds.persist_us_tickers(store, r.data, r.as_of)
+        cik = ds.us_cik(store, ticker)
+    if cik is None:
+        raise DrishtiError(ErrorKind.NOT_FOUND, f"{ticker!r} is not in SEC's ticker list")
+    return cik
+
+
+@guard
+def us_quote(store, ticker: str) -> Result:
+    from .providers import yahoo
+    r = yahoo.us_quote(ticker)
+    if r.ok:
+        yahoo.us_daily(ticker, rng="1y", store=store)      # start tracking it: the us_daily job keeps it updated
+    return r
+
+
+@guard
+def us_fundamentals(store, ticker: str, *, as_of: str | None = None) -> Result:
+    """SEC XBRL fundamentals, point-in-time when `as_of` is given (only figures filed by then)."""
+    import json as _json
+    from .providers import sec
+    cik = _us_cik(store, ticker)
+    r = sec.companyfacts(cik, user_agent=_ua(), as_of=as_of)
+    if r.ok and as_of is None:
+        ds.ensure(store, "us_fundamentals")
+        store.upsert("us_fundamentals", [{"cik": cik, "fetched_at": _now().isoformat(timespec="seconds"),
+                                          "latest_period": r.as_of, "data": _json.dumps(r.data)}], ("cik", "fetched_at"))
+    return r
+
+
+@guard
+def us_filings(store, ticker: str, *, forms: tuple[str, ...] = ("10-K", "10-Q", "8-K", "4", "DEF 14A", "13F-HR"), limit: int = 40) -> Result:
+    from .providers import sec
+    r = sec.submissions(_us_cik(store, ticker), user_agent=_ua())
+    if not r.ok:
+        return r
+    d = r.data
+    d["filings"] = [f for f in d["filings"] if f["form"] in forms][:limit]
+    return Result(data=d, as_of=r.as_of, sources=r.sources)
+
+
+@guard
+def us_13f(store, filer: str) -> Result:
+    """Latest 13F holdings of an institution, by ticker (BRK-B) or CIK number."""
+    from .providers import sec
+    cik = int(filer) if str(filer).isdigit() else _us_cik(store, filer)
+    sub = sec.submissions(cik, user_agent=_ua())
+    if not sub.ok:
+        return sub
+    f13 = [f for f in sub.data["filings"] if f["form"] in ("13F-HR", "13F-HR/A")]
+    if not f13:
+        raise DrishtiError(ErrorKind.NOT_FOUND, f"{sub.data['name']} has no 13F filing")
+    r = sec.holdings_13f(cik, f13[0]["accession"], user_agent=_ua())
+    if r.ok:
+        r.data.update({"filer": sub.data["name"], "period": f13[0]["report_date"], "filed": f13[0]["filed"]})
+        r.as_of = f13[0]["report_date"]
+    return r

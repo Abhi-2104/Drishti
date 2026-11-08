@@ -6,24 +6,18 @@ repeat (files already stored are not fetched again), so "retry until the file is
 `uv run drishti jobs` lists the jobs with a suggested time (IST). `uv run drishti health` shows what is fresh and what failed
 (exit code 1 when anything is degraded). `uv run drishti run <job>` exits 1 if any step failed.
 
-## Windows (Task Scheduler), PowerShell
+## Windows (Task Scheduler)
 
-Run once per job. Edit `-At` and the repetition to taste. `-StartWhenAvailable` is the catch-up: if the machine was off at the
-scheduled time, the task runs when it comes back.
+One script registers every job, and running it again updates them (it removes and re-adds each task):
 
 ```powershell
-$job   = "eod_bhavcopy"
-$uv    = (Get-Command uv).Source
-$proj  = "$HOME\Documents\Drishti\v2"
-$act   = New-ScheduledTaskAction -Execute $uv -Argument "run drishti run $job" -WorkingDirectory $proj
-$trg   = New-ScheduledTaskTrigger -Daily -At 6:45pm
-$trg.Repetition = (New-ScheduledTaskTrigger -Once -At 6:45pm -RepetitionInterval (New-TimeSpan -Minutes 30) -RepetitionDuration (New-TimeSpan -Hours 4)).Repetition
-$set   = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName "Drishti $job" -Action $act -Trigger $trg -Settings $set
+cd $HOME\Documents\Drishti\v2
+powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1
 ```
 
-Remove with `Unregister-ScheduledTask -TaskName "Drishti eod_bhavcopy" -Confirm:$false`. Test one by hand first with
-`Start-ScheduledTask -TaskName "Drishti eod_bhavcopy"` and then `uv run drishti health`.
+`-Remove` takes them all out again. Tasks run while you are logged on; `-StartWhenAvailable` runs a missed one when the
+machine wakes. Try one by hand with `Start-ScheduledTask -TaskName "Drishti eod_bhavcopy"`, then `uv run drishti health`.
+The job list in the script is checked by a test against `drishti jobs`, so a new job cannot be forgotten there.
 
 ## Linux / WSL (cron)
 
@@ -37,15 +31,21 @@ Remove with `Unregister-ScheduledTask -TaskName "Drishti eod_bhavcopy" -Confirm:
 Create `~/Library/LaunchAgents/com.drishti.eod_bhavcopy.plist` running `uv run drishti run eod_bhavcopy` from the project
 directory with `StartCalendarInterval` Hour 18 / Minute 45, then `launchctl load` it.
 
-## Suggested schedule
+## Schedule (what the script registers)
 
 | Job | When (IST) | Why |
 |---|---|---|
-| `eod_bhavcopy` | 18:45, repeat every 30 min until 22:45 | NSE/BSE publish between about 18:00 and 19:00 |
-| `eod_flows` | 19:15, repeat every 30 min until 23:00 | participant OI and FII/DII are published after the close |
-| `insider` | 07:30 and 20:30 | filings arrive through the evening; only new ones are downloaded |
-| `shp_master` | 07:45 daily | filings arrive around quarter-end |
+| `eod_bhavcopy` | daily 18:45, every 30 min for 4 h | NSE/BSE publish between about 18:00 and 19:00; then split/bonus adjustments |
+| `eod_flows` | daily 19:15, every 30 min for 4 h | participant OI, F&O ban list, index closes, bulk/block deals, FII/DII |
+| `eod_corporate` | daily 19:45, hourly for 2 h | announcements, corporate actions, board meetings, ratings, large deals, IPOs |
+| `signals_daily` | daily 21:45 | after the evening data is in |
+| `premarket` | daily 08:45, every 30 min for 1 h | Gift Nifty, NSDL confirmed FPI flows |
+| `macro_daily` | daily 07:15 | Yahoo and FRED daily series |
+| `insider` | daily 07:30 and 20:30 | filings arrive through the evening; only new ones are downloaded |
+| `shp_master` | daily 07:45 | filings arrive around quarter-end |
+| `calendars` | Mon 07:00 | holidays (incl. special sessions) and expiry dates |
 | `macro_weekly` | Sat 10:00 | CFTC publishes Friday; FRED updates weekly |
-| `security_master` | Sun 10:00 | refreshes listings and picks up BSE scrip codes not yet seen |
+| `security_master` | Sun 10:00 | listings and BSE scrip codes |
 
-Not verified on a real Task Scheduler yet. Try one job and look at `drishti health` before registering the rest.
+Daily jobs also run at weekends: a weekend run finds nothing new and costs a few requests, and it catches special
+sessions such as Diwali Muhurat trading without a calendar of its own.

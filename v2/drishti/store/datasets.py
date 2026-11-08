@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS expiry (symbol TEXT NOT NULL, expiry TEXT NOT NULL, s
 CREATE TABLE IF NOT EXISTS fundamentals (
     isin TEXT NOT NULL, latest_quarter TEXT NOT NULL, slug TEXT, basis TEXT, fetched_at TEXT NOT NULL, data TEXT NOT NULL,
     PRIMARY KEY (isin, latest_quarter))""",
+    "price_adjustment": """
+CREATE TABLE IF NOT EXISTS price_adjustment (
+    isin TEXT NOT NULL, exchange TEXT NOT NULL, series TEXT NOT NULL, ex_date TEXT NOT NULL, factor REAL NOT NULL,
+    prev_close REAL, last_close REAL, last_date TEXT, kind TEXT, subject TEXT, PRIMARY KEY (isin, exchange, series, ex_date));
+CREATE INDEX IF NOT EXISTS ix_price_adjustment_isin ON price_adjustment (isin, ex_date)""",
+    "us_price": """
+CREATE TABLE IF NOT EXISTS us_price (
+    symbol TEXT NOT NULL, trade_date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL NOT NULL, adj_close REAL, volume INTEGER,
+    PRIMARY KEY (symbol, trade_date))""",
+    "us_security": """
+CREATE TABLE IF NOT EXISTS us_security (ticker TEXT PRIMARY KEY, cik INTEGER NOT NULL, name TEXT, updated TEXT)""",
+    "us_fundamentals": """
+CREATE TABLE IF NOT EXISTS us_fundamentals (cik INTEGER NOT NULL, fetched_at TEXT NOT NULL, latest_period TEXT, data TEXT NOT NULL,
+    PRIMARY KEY (cik, fetched_at))""",
     "board_meeting": """
 CREATE TABLE IF NOT EXISTS board_meeting (
     exchange TEXT NOT NULL, code TEXT NOT NULL, meeting_date TEXT NOT NULL, purpose TEXT NOT NULL, symbol TEXT, isin TEXT,
@@ -394,3 +408,79 @@ def persist_fpi(store, data: dict) -> int:
     d_day = data.get("derivatives_date") or data["date"]
     der = [{"report_date": d_day, **r} for r in data.get("derivatives") or []]
     return n + (store.upsert("fpi_nsdl_deriv", der, ("report_date", "product")) if der else 0)
+
+
+# --- split / bonus / rights adjustment -------------------------------------------------------------------------
+ADJ_MIN_MOVE = 0.005        # prev_close must differ from the stored last close by more than 0.5% to be an adjustment
+ADJ_GAP_SHARE = 0.20        # a day where more than this share of stocks 'adjust' is a missing day in the store, not actions
+
+
+def rebuild_adjustments(store, *, since: str | None = None) -> dict:
+    """Find split / bonus / rights adjustments from the exchange's own previous close.
+
+    On an ex-date the bhavcopy's previous close is the adjusted one (a 1:10 split shows 1/10 of the last close), so
+    factor = prev_close(ex-date) / close(previous stored session) for the same ISIN, exchange and series. Dividends are
+    not adjusted by the exchange, so they never show up here. A day where a large share of all stocks show a factor is
+    a session missing from the store (both closes then refer to different days): such days are skipped and returned.
+    Each event is labelled from corp_action when an action of that kind is stored for the ISIN and ex-date."""
+    ensure(store, "price_eod", "price_adjustment", "corp_action")
+    lo = since or "0000-00-00"
+    rows = store.query(f"""
+        WITH s AS (SELECT isin, exchange, series, trade_date, close, prev_close,
+                          LAG(close) OVER w AS last_close, LAG(trade_date) OVER w AS last_date
+                   FROM price_eod WINDOW w AS (PARTITION BY isin, exchange, series ORDER BY trade_date))
+        SELECT * FROM s WHERE trade_date >= ? AND last_close IS NOT NULL AND last_close > 0 AND prev_close IS NOT NULL
+               AND prev_close > 0""", (lo,))
+    per_day: dict[tuple[str, str], list] = {}
+    for r in rows:
+        per_day.setdefault((r["trade_date"], r["exchange"]), []).append(r)
+    events, gap_days = [], []
+    for (day, exch), rs in sorted(per_day.items()):
+        moved = [r for r in rs if abs(r["prev_close"] / r["last_close"] - 1) > ADJ_MIN_MOVE]
+        if len(rs) >= 50 and len(moved) > ADJ_GAP_SHARE * len(rs):
+            gap_days.append({"date": day, "exchange": exch, "stocks": len(rs), "moved": len(moved)})
+            continue
+        events += moved
+    out = []
+    for r in events:
+        act = store.query("SELECT kind, subject FROM corp_action WHERE isin=? AND ex_date=? AND kind IN ('split', 'bonus', 'rights') LIMIT 1",
+                          (r["isin"], r["trade_date"]))
+        out.append({"isin": r["isin"], "exchange": r["exchange"], "series": r["series"], "ex_date": r["trade_date"],
+                    "factor": round(r["prev_close"] / r["last_close"], 6), "prev_close": r["prev_close"], "last_close": r["last_close"],
+                    "last_date": r["last_date"], "kind": act[0]["kind"] if act else None, "subject": act[0]["subject"] if act else None})
+    if since is None:
+        store.delete_where("price_adjustment", "1=1", ())
+    else:
+        store.delete_where("price_adjustment", "ex_date >= ?", (since,))
+    n = store.upsert("price_adjustment", out, ("isin", "exchange", "series", "ex_date")) if out else 0
+    return {"events": n, "labelled": sum(1 for x in out if x["kind"]), "gap_days": gap_days, "since": since}
+
+
+def adjustments_for(store, isin: str) -> list[dict]:
+    ensure(store, "price_adjustment")
+    return store.query("SELECT * FROM price_adjustment WHERE isin=? ORDER BY ex_date", (isin,))
+
+
+# --- US --------------------------------------------------------------------------------------------------------------
+def persist_us_prices(store, symbol: str, bars) -> int:
+    ensure(store, "us_price")
+    rows = [{"symbol": symbol, "trade_date": b["date"], "open": b.get("open"), "high": b.get("high"), "low": b.get("low"),
+             "close": b["close"], "adj_close": b.get("adj_close"), "volume": b.get("volume")} for b in bars]
+    return store.upsert("us_price", rows, ("symbol", "trade_date")) if rows else 0
+
+
+def persist_us_tickers(store, rows, updated: str) -> int:
+    ensure(store, "us_security")
+    return store.upsert("us_security", [{**r, "updated": updated} for r in rows], ("ticker",)) if rows else 0
+
+
+def us_cik(store, ticker: str) -> int | None:
+    ensure(store, "us_security")
+    r = store.query("SELECT cik FROM us_security WHERE ticker=?", (ticker.strip().upper(),))
+    return r[0]["cik"] if r else None
+
+
+def tracked_us_symbols(store) -> list[str]:
+    """Every US ticker ever fetched keeps being updated by the us_daily job: no list to maintain."""
+    ensure(store, "us_price")
+    return [r["symbol"] for r in store.query("SELECT DISTINCT symbol FROM us_price ORDER BY symbol")]

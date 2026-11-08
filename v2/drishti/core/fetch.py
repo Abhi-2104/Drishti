@@ -83,6 +83,9 @@ class Profile:
     headers: dict[str, str]
     timeout: tuple[float, float] = (5.0, 15.0)  # (connect, read)
     retries: int = 2  # extra attempts after BLOCKED / BLOCKED_HTML, with exponential backoff
+    # Some government hosts (MoSPI) still need TLS legacy renegotiation, which OpenSSL 3 refuses by default. This allows
+    # only that; certificate and hostname verification stay ON. Never a reason to set verify=False anywhere.
+    legacy_tls_renegotiation: bool = False
 
     def __post_init__(self):
         if not self.headers.get("User-Agent"):
@@ -107,6 +110,24 @@ _sessions: dict[str, requests.Session] = {}
 _sessions_lock = threading.Lock()
 
 
+def legacy_tls_context():
+    """A verifying TLS context (CERT_REQUIRED, hostname checked) that also allows legacy renegotiation."""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+    return ctx
+
+
+class _LegacyRenegotiation(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, *a, **kw):
+        kw["ssl_context"] = legacy_tls_context()
+        return super().init_poolmanager(*a, **kw)
+
+    def proxy_manager_for(self, *a, **kw):
+        kw["ssl_context"] = legacy_tls_context()
+        return super().proxy_manager_for(*a, **kw)
+
+
 def session(profile: Profile) -> requests.Session:
     """One pooled session per profile (keeps cookies, e.g. NSE live)."""
     with _sessions_lock:
@@ -114,6 +135,8 @@ def session(profile: Profile) -> requests.Session:
         if s is None:
             s = _sessions[profile.name] = requests.Session()
             s.headers.update(profile.headers)
+            if profile.legacy_tls_renegotiation:
+                s.mount("https://", _LegacyRenegotiation())
         return s
 
 

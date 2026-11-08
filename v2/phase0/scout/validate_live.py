@@ -26,7 +26,7 @@ from drishti.providers.profiles import NSE_ARCHIVE
 from drishti.store import Store
 
 OUT = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "_raw" / "validate_live.json"
-GROUPS = ("archive", "bse", "pit", "shp", "macro", "master", "corp", "quotes", "samples", "batch3")
+GROUPS = ("archive", "bse", "pit", "shp", "macro", "master", "corp", "quotes", "samples", "batch3", "adjust", "market", "us")
 
 
 def line(ok: bool, name: str, secs: float, detail: str) -> None:
@@ -279,6 +279,102 @@ def group_batch3(report: list, store: Store) -> None:
          lambda r: f"{len(r.data['deals'])} block deals in 30 days using {r.data['requests']} requests, capped days {r.data['capped_days']}")
 
 
+def group_market(report: list, store: Store) -> None:
+    """Run in market hours (Mon-Fri 10:00-14:00 IST). Proves the live paths are live: each quote is taken twice 45 s
+    apart and must move (volume up), the option chain and index snapshot must be minutes old, and NSE vs BSE must agree."""
+    from datetime import datetime, timedelta
+    from drishti import data_tools as dt
+    from drishti.core.canary import IST
+
+    def check(name, ok_, detail):
+        line(ok_, name, 0.0, detail)
+        report.append({"name": name, "ok": ok_, "detail": detail})
+
+    now = datetime.now(IST)
+    if not nse_quote.market_open(now):
+        print(f"     market is closed now ({now:%a %H:%M} IST): run this Mon-Fri between 10:00 and 14:00")
+        return
+    m = show(report, "market_status", lambda: nse_corp.market_status(), lambda r: f"CM {r.data['capital_market']}, Gift Nifty "
+             f"{r.data['gift_nifty']['last']} at {r.data['gift_nifty']['timestamp']}")
+    if m.ok:
+        check("market_status_open", m.data["capital_market"] == "Open", f"capital market says {m.data['capital_market']!r}")
+        gts = m.data["gift_nifty"]["timestamp"]
+        check("gift_nifty_fresh", bool(gts) and now.replace(tzinfo=None) - datetime.fromisoformat(gts) < timedelta(hours=2), f"last at {gts}")
+    security_master.build_security_master(store)
+    names = ["RELIANCE", "HDFCBANK", "M&M", "542034"] + _pick_dynamic(store)[:1]
+    first = {q: dt.quote(store, q) for q in names}
+    time.sleep(45)
+    for q in names:
+        a, b = first[q], dt.quote(store, q)
+        if not (a.ok and b.ok):
+            check(f"live_quote_{q}", False, f"{(a.error or b.error).kind}: {(a.error or b.error).detail[:100]}")
+            continue
+        moved = (b.data.get("volume") or 0) > (a.data.get("volume") or 0) or b.data["last"] != a.data["last"]
+        gap = (b.data.get("bse_cross_check") or {}).get("gap_pct")
+        check(f"live_quote_{q}", moved and b.data.get("live") is not False,
+              f"last {a.data['last']} -> {b.data['last']}, volume {a.data.get('volume')} -> {b.data.get('volume')}, live={b.data.get('live')}"
+              + (f", BSE gap {gap}%" if gap is not None else ""))
+        if gap is not None:
+            check(f"nse_bse_agree_{q}", abs(gap) < 1.0, f"gap {gap}%")
+    for sym in ("NIFTY", "BANKNIFTY"):
+        r = nse_quote.option_chain(sym)
+        if not r.ok:
+            check(f"option_chain_live_{sym}", False, f"{r.error.kind}: {r.error.detail[:100]}")
+            continue
+        age = now.replace(tzinfo=None) - datetime.fromisoformat(r.data["timestamp"])
+        check(f"option_chain_live_{sym}", age < timedelta(minutes=10) and r.data["live"], f"expiry {r.data['expiry']}, {len(r.data['rows'])} rows, "
+              f"timestamp {r.data['timestamp']} ({age.total_seconds() / 60:.0f} min old)")
+    r = nse_quote.all_indices()
+    if r.ok:
+        age = now.replace(tzinfo=None) - datetime.fromisoformat(r.data["timestamp"])
+        check("all_indices_live", age < timedelta(minutes=10), f"{len(r.data['indices'])} indices at {r.data['timestamp']}, breadth {r.data['breadth']}")
+    i = show(report, "ipos_weekday", lambda: nse_corp.ipos(), lambda r: f"current {len(r.data['current'])}, upcoming {len(r.data['upcoming'])}, "
+             f"closed in 30d {len(r.data['recent'])}")
+    if i.ok:
+        for x in (i.data["current"] + i.data["upcoming"])[:3]:
+            print(f"     {x['status']}: {x['company']} {x['open']}..{x['close']} {x['price_range']} {x['security_type']}")
+
+
+def group_us(report: list, store: Store) -> None:
+    """US layer end to end: Yahoo quote and bars, SEC fundamentals (now and as of a past date), filings, a 13F."""
+    from drishti import data_tools as dt
+    for t in ("AAPL", "MSFT", "BRK-B"):
+        show(report, f"us_quote_{t}", lambda t=t: dt.us_quote(store, t),
+             lambda r: f"{r.data['name']} {r.data['last']} {r.data['currency']} at {r.data['market_time']} ({r.data['exchange']})")
+    for t in ("AAPL", "MSFT", "JPM"):
+        show(report, f"us_fundamentals_{t}", lambda t=t: dt.us_fundamentals(store, t), lambda r: f"{r.data['name']}: {r.data['quality']}")
+    show(report, "us_fundamentals_AAPL_asof_2024", lambda: dt.us_fundamentals(store, "AAPL", as_of="2024-01-01"),
+         lambda r: f"latest annual period known on 1 Jan 2024: {r.data['quality']['latest_annual_period']}")
+    show(report, "us_filings_AAPL", lambda: dt.us_filings(store, "AAPL"),
+         lambda r: f"{len(r.data['filings'])} filings, newest {[(f['form'], f['filed']) for f in r.data['filings'][:4]]}")
+    show(report, "us_13f_BRK", lambda: dt.us_13f(store, "1067983"),
+         lambda r: f"{r.data['filer']} {r.data['period']}: {len(r.data['holdings'])} holdings, ${r.data['total_usd'] / 1e9:.1f} bn; top "
+                   f"{sorted(r.data['holdings'], key=lambda h: -h['value_usd'])[0]['issuer']}")
+
+
+def group_adjust(report: list, store: Store) -> None:
+    """Split / bonus / rights adjustments found in YOUR stored price history (read-only use of the real store, except
+    that it rewrites the price_adjustment table, which is derived). Prints the events so they can be eyeballed."""
+    from drishti.config import load_settings
+    from drishti.store import datasets as ds
+    with Store(load_settings().db_path) as real:
+        t0 = time.time()
+        r = ds.rebuild_adjustments(real)
+        ok = not r["gap_days"]
+        line(ok, "price_adjustments", time.time() - t0, f"{r['events']} events, {r['labelled']} labelled from corporate actions, "
+                                                        f"{len(r['gap_days'])} missing-session days skipped")
+        report.append({"name": "price_adjustments", "ok": ok, "events": r["events"], "gap_days": r["gap_days"]})
+        for g in r["gap_days"][:5]:
+            print(f"     gap: {g}")
+        ev = real.query("SELECT a.*, p.symbol FROM price_adjustment a LEFT JOIN price_eod p ON p.isin=a.isin AND p.trade_date=a.ex_date "
+                        "AND p.exchange=a.exchange AND p.series=a.series ORDER BY ex_date DESC LIMIT 15")
+        for e in ev:
+            print(f"     {e['ex_date']} {e['symbol'] or e['isin']:<14s} {e['exchange']} x{e['factor']:<9g} last {e['last_close']} -> prev {e['prev_close']}"
+                  f"  {e['kind'] or '(no stored action)'} {(e['subject'] or '')[:60]}")
+        kinds = real.query("SELECT COALESCE(kind, 'unlabelled') AS k, COUNT(*) AS n FROM price_adjustment GROUP BY 1")
+        print("     by kind: " + ", ".join(f"{k['k']}: {k['n']}" for k in kinds))
+
+
 def group_samples(report: list, store: Store) -> None:
     """Save raw pages needed to pin parsers with real fixtures: Screener pages for a bank, an NBFC, an '&' symbol and an
     SME (half-yearly) filer, plus today's marketStatus."""
@@ -353,7 +449,7 @@ def main(argv=None) -> int:
         for g in args.only or GROUPS:
             print(f"== {g}")
             {"archive": lambda: group_archive(report, store), "bse": lambda: group_bse(report, store),
-             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "master": lambda: group_master(report, store), "corp": lambda: group_corp(report, store), "quotes": lambda: group_quotes(report, store), "samples": lambda: group_samples(report, store), "batch3": lambda: group_batch3(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
+             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "master": lambda: group_master(report, store), "corp": lambda: group_corp(report, store), "quotes": lambda: group_quotes(report, store), "samples": lambda: group_samples(report, store), "batch3": lambda: group_batch3(report, store), "adjust": lambda: group_adjust(report, store), "market": lambda: group_market(report, store), "us": lambda: group_us(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
             print()
         bad = [r["name"] for r in report if not r["ok"]]
         print(f"{len(report) - len(bad)} ok, {len(bad)} failed" + (f": {', '.join(bad)}" if bad else ""))

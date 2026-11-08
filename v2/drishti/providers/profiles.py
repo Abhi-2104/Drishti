@@ -32,3 +32,6 @@ SCREENER = Profile("screener", browser_headers({"Accept": "text/html,application
 # NSDL FPI monitor (www.fpi.nsdl.co.in): a public ASP.NET report page, slow to answer; browser-like as in the 8 Nov probe.
 NSDL = Profile("nsdl", browser_headers({"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}),
                timeout=(5.0, 30.0))
+
+# MoSPI eSankhyiki API (api.mospi.gov.in): public JSON, no key. Its TLS needs legacy renegotiation; verification stays on.
+MOSPI = Profile("mospi", browser_headers({"Accept": "application/json"}), timeout=(10.0, 40.0), legacy_tls_renegotiation=True)

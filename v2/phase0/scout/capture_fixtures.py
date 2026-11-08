@@ -31,7 +31,7 @@ from drishti.core.canary import IST, check_fresh, parse_date, today_ist
 from drishti.core.envelope import DrishtiError, ErrorKind
 from drishti.core.fetch import HONEST_UA, Profile, browser_headers
 
-ALL_GROUPS = ("archive", "nse_live", "shp", "bse", "macro", "screener", "sec", "batch3")
+ALL_GROUPS = ("archive", "nse_live", "shp", "bse", "macro", "screener", "sec", "batch3", "batch4")
 
 # --- per-source profiles (UA decided per source; see plan section 2) --------------------------------
 NSE = Profile("nse", browser_headers({"Referer": "https://www.nseindia.com/"}), timeout=(5.0, 20.0))
@@ -424,6 +424,41 @@ def grp_batch3(run: Run, td: date) -> None:
          Profile("nsdl", browser_headers(), timeout=(5.0, 30.0)), "html", note="L2-2 NSDL FPI daily (probe)")
 
 
+def grp_batch4(run: Run, td: date) -> None:
+    """8 Nov: India macro (MoSPI, legacy TLS renegotiation, certificates still verified), NSE delivery %, BSE scrip list,
+    SEC ticker list and one real 13F information table (SEC needs sec_user_agent in settings.toml)."""
+    from drishti.config import load_settings
+    from drishti.providers.profiles import MOSPI
+    m = "https://api.mospi.gov.in/api"
+    y = today_ist().year
+    for name, path in (("mospi_cpi_2024", f"cpi/getCPIData?base_year=2024&series=Current&year={y}&Format=JSON"),
+                       ("mospi_cpi_2012", f"cpi/getCPIIndex?base_year=2012&series=Current&year={y - 1},{y}&Format=JSON"),
+                       ("mospi_wpi", f"wpi/getWpiRecords?base_year=2022-23&year={y}&Format=JSON"),
+                       ("mospi_iip", f"iip/getIipData?base_year=2011-12&frequency=Monthly&year={y}&type=General&Format=JSON"),
+                       ("mospi_rbi_fx_reserves", f"rbi/getRbiRecords?sub_indicator_code=47&year={y}&Format=JSON")):
+        grab(run, name, "batch4", f"{name}.json", f"{m}/{path}", MOSPI, "json", note="India macro probe")
+    grab(run, "nse_delivery", "batch4", "sec_bhavdata_full.csv",
+         f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{td.strftime('%d%m%Y')}.csv", NSE_ARCHIVE, "csv",
+         note="delivery quantity and % per stock")
+    grab(run, "bse_scrip_list", "batch4", "bse_scrip_list.json",
+         "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active",
+         BSE_API, "json", note="every active BSE scrip with ISIN (maps the BSE codes the bhavcopy misses)")
+    ua = load_settings().sec_user_agent
+    if not ua:
+        run.note("sec_user_agent not set in settings.toml: SEC probes skipped")
+        return
+    sec = Profile("sec", {"User-Agent": ua, "Accept": "application/json, text/xml, */*"}, timeout=(5.0, 60.0))
+    grab(run, "sec_tickers", "batch4", "sec_company_tickers.json", "https://www.sec.gov/files/company_tickers.json", sec, "json")
+    got, _ = grab(run, "sec_13f_index", "batch4", "sec_13f_index.json",
+                  "https://www.sec.gov/Archives/edgar/data/1067983/000119312526352200/index.json", sec, "json", note="Berkshire 13F, Aug 2026")
+    if got is not None:
+        names = [i["name"] for i in json.loads(got.body)["directory"]["item"]]
+        xml = [n for n in names if n.lower().endswith(".xml") and "primary_doc" not in n.lower()]
+        if xml:
+            grab(run, "sec_13f_infotable", "batch4", "sec_13f_infotable.xml",
+                 f"https://www.sec.gov/Archives/edgar/data/1067983/000119312526352200/{xml[0]}", sec, "xml")
+
+
 def last_weekday(d: date) -> date:
     while d.weekday() >= 5:
         d -= timedelta(days=1)
@@ -467,6 +502,8 @@ def main(argv: list[str] | None = None) -> int:
         grp_sec(run, args.sec_ua)
     if "batch3" in groups:
         grp_batch3(run, td)
+    if "batch4" in groups:
+        grp_batch4(run, td)
 
     ok = [i for i in run.items if i["ok"]]
     bad = [i for i in run.items if not i["ok"]]

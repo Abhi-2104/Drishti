@@ -96,6 +96,22 @@ def _bse_bhavcopy(store: Store, today: date) -> Result:
     return bse_provider.bhavcopy(date.fromisoformat(row[0]["d"]), store=store)
 
 
+def _us_daily(store: Store, today: date) -> Result:
+    """Refresh every tracked US ticker (any ticker ever looked up). Nothing tracked yet is a note, not a failure."""
+    syms = ds.tracked_us_symbols(store)
+    bars, failed, kinds = 0, [], []
+    for sym in syms:
+        r = yahoo.us_daily(sym, rng="1mo", store=store, today=today)
+        if r.ok:
+            bars += len(r.data["bars"])
+        else:
+            failed.append(f"{sym}: {r.error.kind}")
+            kinds.append(r.error.kind)
+    if failed and len(failed) == len(syms):
+        return Result(error=DrishtiError(kinds[0], f"us_daily: every ticker failed: {failed[:5]}"))
+    return Result(data={"symbols": len(syms), "bars": bars, "failed": failed}, as_of=today.isoformat())
+
+
 def _insider_run(store: Store, today: date) -> Result:
     store.ensure_table(INSIDER_DDL)
     since = (today - timedelta(days=14)).isoformat()
@@ -174,6 +190,9 @@ STEPS = {
                         count=lambda r: sum(len(r.data[k]) for k in ("bulk", "block", "short"))),
     "announcements": Step("announcements", lambda s, t: nse_corp.announcements(days=2, today=t), persist=_p(ds.persist_announcements)),
     "corp_actions": Step("corp_actions", lambda s, t: nse_corp.corporate_actions(today=t), persist=_p(ds.persist_corp_actions)),
+    "price_adjustments": Step("price_adjustments", lambda s, t: Result(data=ds.rebuild_adjustments(s, since=(t - timedelta(days=30)).isoformat()),
+                                                                      as_of=t.isoformat()), count=lambda r: r.data["events"]),
+    "us_daily": Step("us_daily", lambda s, t: _us_daily(s, t), count=lambda r: r.data["bars"]),
     "board_meetings": Step("board_meetings", lambda s, t: nse_corp.board_meetings(today=t), persist=_p(ds.persist_board_meetings)),
     "bse_corp_actions": Step("bse_corp_actions", lambda s, t: bse_provider.corporate_actions(today=t), persist=_p(ds.persist_bse_corp_actions)),
     "bse_result_calendar": Step("bse_result_calendar", lambda s, t: bse_provider.result_calendar(today=t),
@@ -200,8 +219,8 @@ STEPS = {
 }
 
 JOBS: dict[str, Job] = {j.name: j for j in (
-    Job("eod_bhavcopy", "18:45", "NSE cash + F&O and BSE cash bhavcopies for the latest trading day",
-        tuple(STEPS[k] for k in ("cm_bhavcopy", "fo_bhavcopy", "bse_bhavcopy"))),
+    Job("eod_bhavcopy", "18:45", "NSE cash + F&O and BSE cash bhavcopies for the latest trading day, then split/bonus adjustments",
+        tuple(STEPS[k] for k in ("cm_bhavcopy", "fo_bhavcopy", "bse_bhavcopy", "price_adjustments"))),
     Job("eod_flows", "19:15", "Participant OI, F&O ban list, index closes, bulk and block deals, cash FII/DII",
         tuple(STEPS[k] for k in ("participant_oi", "fo_ban_list", "index_closes", "bulk_deals", "block_deals", "fii_dii_cash"))),
     Job("eod_corporate", "19:45", "Announcements, corporate actions (NSE, then BSE-only), board meetings and the BSE results "
@@ -216,6 +235,7 @@ JOBS: dict[str, Job] = {j.name: j for j in (
         (STEPS["insider_trades"],)),
     Job("macro_daily", "07:15", "Regime inputs: Yahoo DXY/US10Y/Brent/USD-INR/VIX and FRED daily series",
         tuple(STEPS[f"yahoo_{x}"] for x in yahoo.SYMBOLS) + tuple(STEPS[f"fred_{x}"] for x in DAILY_FRED)),
+    Job("us_daily", "07:20", "Daily bars for every tracked US ticker (any ticker looked up once)", (STEPS["us_daily"],)),
     Job("macro_weekly", "Sat 10:00", "Fed balance sheet, US M2, CFTC positioning",
         tuple(STEPS[f"fred_{x}"] for x in WEEKLY_FRED) + (STEPS["cftc_tff"],)),
     Job("shp_master", "07:45", "Shareholding-pattern master: promoter holding per company with QoQ change", (STEPS["shp_master"],)),

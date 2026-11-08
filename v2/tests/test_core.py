@@ -209,3 +209,14 @@ def test_browser_headers_use_current_ua_and_allow_override(monkeypatch):
 
 def test_honest_ua_is_not_a_browser_string():
     assert "Mozilla" not in fetch.HONEST_UA and "@" not in fetch.HONEST_UA
+
+
+def test_legacy_tls_renegotiation_keeps_certificate_checks_on():
+    import ssl
+    from drishti.core import fetch
+    from drishti.providers.profiles import MOSPI
+    ctx = fetch.legacy_tls_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
+    assert ctx.options & getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+    s = fetch.session(MOSPI)
+    assert isinstance(s.get_adapter("https://api.mospi.gov.in/"), fetch._LegacyRenegotiation) and s.verify is True

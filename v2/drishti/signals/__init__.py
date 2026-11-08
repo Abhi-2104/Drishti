@@ -13,6 +13,7 @@ MARKET = {
     "participant_oi": market.participant_oi,
     "sector_rotation": market.sector_rotation,
     "midcap_ratio": market.midcap_ratio,
+    "index_valuation": market.index_valuation,
     "fii_dii": flows.fii_dii,
     "options_flow:NIFTY": lambda s, on=None: flows.options_flow(s, on, "NIFTY"),
     "options_flow:BANKNIFTY": lambda s, on=None: flows.options_flow(s, on, "BANKNIFTY"),

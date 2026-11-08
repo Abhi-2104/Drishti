@@ -122,7 +122,61 @@ def backfill_prices(store, *, days=380, budget_s=3600, start=None, progress=_noo
             progress(f"   ...prices {r.as_of}: BSE file failed ({r.data['bse_error']}); NSE prices kept")
         return k
     ds.ensure(store, "price_eod")
-    return _daily(store, "prices", "price_eod", fetch, persist, days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
+    rep = _daily(store, "prices", "price_eod", fetch, persist, days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
+    adj = ds.rebuild_adjustments(store)
+    progress(f"   ...prices: {adj['events']} split/bonus/rights adjustments found ({adj['labelled']} matched to a stored corporate action)"
+             + (f"; {len(adj['gap_days'])} days look like missing sessions and were skipped" if adj["gap_days"] else ""))
+    return rep
+
+
+def backfill_adjustments(store, *, progress=_noop, **_):
+    """Recompute every split / bonus / rights adjustment from the stored prices (after a corporate-action backfill, so
+    the events get labelled). Fast: one pass over the price table."""
+    rep = BackfillReport("adjustments")
+    adj = ds.rebuild_adjustments(store)
+    rep.done, rep.rows = 1, adj["events"]
+    for g in adj["gap_days"]:
+        rep.failed.append({"date": g["date"], "kind": "GAP", "detail": f"{g['exchange']}: {g['moved']} of {g['stocks']} stocks 'adjusted' at once: "
+                                                                      "a session is missing from the store before this day"})
+    progress(f"   ...adjustments: {adj['events']} events, {adj['labelled']} labelled from corporate actions")
+    return rep
+
+
+def backfill_corp_actions(store, *, days=730, window=90, budget_s=1800, today=None, clock=time.monotonic, progress=_noop):
+    """NSE and BSE corporate actions by ex-date for the past `days`, in `window`-day pieces (remembered, so this resumes),
+    then the price adjustments are relabelled. Lets every split / bonus in the price history say what it was."""
+    from datetime import datetime
+    ds.ensure(store, "corp_action")
+    store.ensure_table(WINDOW_DDL)
+    rep = BackfillReport("corp_actions")
+    today = today or today_ist()
+    t0 = clock()
+    have = {(r["target"], r["start"], r["end"]) for r in store.query("SELECT target, start, end FROM backfill_window")}
+    for k in range(0, days, window):
+        end = today - timedelta(days=k)
+        start = end - timedelta(days=window - 1)
+        if clock() - t0 > budget_s:
+            rep.stopped = f"time budget reached at {end}; run again to continue"
+            break
+        for tag, fn, persist in (("corp_nse", lambda: nse_corp.corporate_actions(back_days=window - 1, ahead_days=0, today=end), ds.persist_corp_actions),
+                                 ("corp_bse", lambda: bse.corporate_actions(back_days=window - 1, ahead_days=0, today=end), ds.persist_bse_corp_actions)):
+            if (tag, start.isoformat(), end.isoformat()) in have:
+                rep.skipped += 1
+                continue
+            r = fn()
+            if r.ok or (r.error and r.error.kind == ErrorKind.EMPTY):
+                n = persist(store, r.data) if r.ok else 0
+                rep.rows += n
+                rep.done += 1
+                store.upsert("backfill_window", [{"target": tag, "start": start.isoformat(), "end": end.isoformat(), "rows": n, "capped": None,
+                                                  "done_at": datetime.now().isoformat(timespec="seconds")}], ("target", "start", "end"))
+                progress(f"   ...corp actions {tag[5:].upper()} {start}..{end}: {n} actions ({clock() - t0:.0f}s)")
+            else:
+                rep.failed.append({"date": end.isoformat(), "kind": str(r.error.kind), "detail": f"{tag}: {r.error.detail[:150]}"})
+                progress(f"   ...corp actions {tag[5:].upper()} {start}..{end}: {r.error.kind}")
+    adj = ds.rebuild_adjustments(store)
+    progress(f"   ...adjustments relabelled: {adj['labelled']} of {adj['events']} events matched to a corporate action")
+    return rep
 
 
 def backfill_macro(store, *, rng="5y", today=None, progress=_noop):
@@ -300,5 +354,6 @@ def backfill_deals(store, *, days=365, window=30, kinds=COMPLETE_HISTORY_KINDS, 
 TARGETS = {
     "index_closes": backfill_index_closes, "participant_oi": backfill_participant_oi, "fo_index": backfill_fo_index,
     "prices": backfill_prices, "macro": backfill_macro, "insider": backfill_insider, "shp": backfill_shp, "deals": backfill_deals,
+    "corp_actions": backfill_corp_actions, "adjustments": backfill_adjustments,
 }
-DEFAULT_DAYS = {"prices": 380, "index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180, "deals": 365}
+DEFAULT_DAYS = {"prices": 380, "index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180, "deals": 365, "corp_actions": 730}

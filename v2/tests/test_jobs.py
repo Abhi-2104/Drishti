@@ -170,3 +170,12 @@ def test_bse_bhavcopy_asks_for_the_day_nse_published(monkeypatch):
                             "low": 1, "close": 1, "prev_close": 1, "volume": 1, "turnover": 1, "trades": 1}], "NSE")
     jobs._bse_bhavcopy(st, _d(2026, 11, 8))
     assert asked == [_d(2026, 11, 6)]
+
+
+def test_task_scheduler_script_registers_every_job():
+    import re
+    from pathlib import Path
+    from drishti import jobs
+    ps1 = (Path(__file__).resolve().parents[1] / "scripts" / "register-tasks.ps1").read_text(encoding="utf-8")
+    listed = set(re.findall(r'@\("([a-z_]+)",\s+"(?:Daily|Weekly)"', ps1))
+    assert listed == set(jobs.JOBS), f"script and job registry differ: {sorted(listed ^ set(jobs.JOBS))}"

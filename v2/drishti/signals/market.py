@@ -159,6 +159,47 @@ def midcap_ratio(store, on=None):
                      ver, provisional=True, details={"series_tail": ratio[-p["change_window"]:]}))
 
 
+# --- index valuation (L3-5) ------------------------------------------------------------------------------------
+def index_valuation(store, on=None):
+    """PE, PB and dividend yield of the main NSE indices, each placed against its own stored history. A level is not a
+    timing signal; it tells the decision layer how much optimism is already in the price."""
+    p, ver = params("index_valuation")
+    if not h._exists(store, "index_close"):
+        return unknown("index_valuation", "no index closes stored; run `drishti backfill index_closes`")
+    end = h._d(on)
+    comps, missing, details, provisional = [], [], {}, False
+    labels = []
+    for name in p["indices"]:
+        rows = store.query("SELECT trade_date, pe, pb, div_yield FROM index_close WHERE index_name=? AND trade_date <= ? AND pe IS NOT NULL "
+                           "ORDER BY trade_date", (name, end))
+        if not rows:
+            missing.append(f"{name}: no PE stored")
+            continue
+        last = rows[-1]
+        pe_pct = percentile_of(last["pe"], [r["pe"] for r in rows[:-1]])
+        pb_pct = percentile_of(last["pb"], [r["pb"] for r in rows[:-1] if r["pb"] is not None]) if last["pb"] is not None else None
+        n = len(rows)
+        if n < p["min_sessions_for_label"]:
+            provisional = True
+            missing.append(f"{name}: only {n} sessions of PE history, so the percentile covers less than a year")
+        read = ("cheap vs its history" if pe_pct is not None and pe_pct <= p["cheap_percentile"] else
+                "rich vs its history" if pe_pct is not None and pe_pct >= p["rich_percentile"] else
+                "within its normal range" if pe_pct is not None else "history too short")
+        labels.append(f"{name} {read}")
+        comps.append(Component(f"{name} PE / PB / div yield", [last["pe"], last["pb"], last["div_yield"]], last["trade_date"],
+                               f"PE at the {pe_pct}th percentile of {n} stored sessions" if pe_pct is not None else f"{n} sessions stored",
+                               None, f"PB percentile {pb_pct}" if pb_pct is not None else ""))
+        details[name] = {"pe": last["pe"], "pb": last["pb"], "div_yield": last["div_yield"], "pe_percentile": pe_pct, "pb_percentile": pb_pct,
+                         "sessions": n, "first_date": rows[0]["trade_date"], "as_of": last["trade_date"]}
+    if not details:
+        return unknown("index_valuation", "; ".join(missing))
+    as_of = max(v["as_of"] for v in details.values())
+    return ok(Signal("index_valuation", as_of, None, "; ".join(labels), comps, missing,
+                     "NSE's published index PE (trailing, standalone earnings), PB and dividend yield. Percentiles are against the "
+                     "history stored here; a longer `drishti backfill index_closes --days N` sharpens them.", ver,
+                     provisional=provisional, details=details))
+
+
 # --- macro regime (v1: macroRegime.ts) ------------------------------------------------------------------
 # indicator -> (series in macro_series / index_close, how to read it)
 MACRO_INPUTS = {"DXY": "yahoo:DX-Y.NYB", "US_10Y": "yahoo:^TNX", "Brent_Crude": "yahoo:BZ=F", "USD_INR": "yahoo:INR=X",

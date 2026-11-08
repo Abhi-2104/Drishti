@@ -24,6 +24,26 @@ def _bars(store, isin: str, on, days: int = 400) -> list[dict]:
     return [by[d] for d in sorted(by)]
 
 
+def adjust(bars: list[dict], events: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Bars with every split / bonus / rights adjustment applied backwards (prices x factor, volume / factor), so a
+    1:10 split is not read as a 90% fall. Only events for the exchange and series a bar is on are applied to it."""
+    if not events:
+        return bars, []
+    out, used = [], []
+    for b in bars:
+        f = 1.0
+        for e in events:
+            if e["ex_date"] > b["trade_date"] and e["exchange"] == b["exchange"] and e["series"] == b["series"]:
+                f *= e["factor"]
+        if f != 1.0:
+            b = {**b, **{k: (b[k] * f if b[k] is not None else None) for k in ("open", "high", "low", "close")},
+                 "volume": round(b["volume"] / f) if b.get("volume") else b.get("volume")}
+        out.append(b)
+    first, last = bars[0]["trade_date"], bars[-1]["trade_date"]
+    used = [e for e in events if first < e["ex_date"] <= last]
+    return out, used
+
+
 def atr(bars: list[dict], n: int = 14) -> float | None:
     tr = []
     for prev, b in zip(bars, bars[1:]):
@@ -35,9 +55,11 @@ def atr(bars: list[dict], n: int = 14) -> float | None:
 
 
 def price_context(store, isin: str, on=None):
+    from ..store import datasets as ds
     bars = _bars(store, isin, on)
     if not bars:
         return unknown("price_context", f"no stored prices for {isin}; run `drishti backfill prices`")
+    bars, used = adjust(bars, [e for e in ds.adjustments_for(store, isin) if e["ex_date"] <= h._d(on)])
     last = bars[-1]
     d0, c = last["trade_date"], last["close"]
     closes = [b["close"] for b in bars]
@@ -73,8 +95,13 @@ def price_context(store, isin: str, on=None):
                        f"{a / c * 100:.2f}% of price" if a else ""),
              Component("avg volume 20d", round(vol20) if vol20 else None, d0),
              Component("strength vs Nifty, ~3 months", rs, d0, "% better (+) or worse (-) than the Nifty over the same sessions")]
+    if used:
+        comps.append(Component("adjusted for", [f"{e['ex_date']} {e['kind'] or 'adjustment'} x{e['factor']:g}" for e in used], d0,
+                               "earlier prices scaled so returns and averages span the event"))
     return ok(Signal("price_context", d0, None, trend, comps, missing,
-                     "From exchange bhavcopy closes (NSE primary, BSE for BSE-only names). Not adjusted for splits/bonuses yet: check "
-                     "corporate actions before reading a long-range return.", "price",
+                     "From exchange bhavcopy closes (NSE primary, BSE for BSE-only names), adjusted for splits, bonuses and rights "
+                     "using the exchange's own adjusted previous close. Not adjusted for dividends (price return, not total return).",
+                     "price",
                      details={"isin": isin, "close": c, "atr14": a, "dma": {"20": d20, "50": d50, "200": d200}, "high_52w": hi,
-                              "low_52w": lo, "sessions": len(bars), "exchange": last["exchange"]}))
+                              "low_52w": lo, "sessions": len(bars), "exchange": last["exchange"],
+                              "adjustments": [{k: e[k] for k in ("ex_date", "factor", "kind", "subject")} for e in used]}))

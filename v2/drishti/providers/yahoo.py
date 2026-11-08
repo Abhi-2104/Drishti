@@ -6,6 +6,7 @@ dated today while that market may still be open.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -84,3 +85,67 @@ def daily(symbol: str, *, rng: str = "6mo", today: date | None = None, max_age_d
         prune_incomplete(store, f"yahoo:{symbol}", (today or today_ist()).isoformat())
         persist_macro(store, f"yahoo:{symbol}", [{"date": r["date"], "value": r["close"]} for r in rows], SOURCE)
     return Result(data=rows, as_of=newest.isoformat(), sources=[got.source(SOURCE)])
+
+
+# --- US single names (L4-17): daily bars with Yahoo's split/dividend-adjusted close, and a quote from the chart meta --
+def parse_us(body: bytes, symbol: str, *, min_rows: int = 1) -> dict:
+    """OHLCV + adjusted close per day, and the quote fields Yahoo puts in the chart meta."""
+    label = f"yahoo_us_{symbol}"
+    bars = parse_chart(body, symbol, min_rows=min_rows)
+    doc = json.loads(body)
+    res = doc["chart"]["result"][0]
+    meta, ts, q = res["meta"], res["timestamp"], res["indicators"]["quote"][0]
+    adj = ((res["indicators"].get("adjclose") or [{}])[0] or {}).get("adjclose")
+    tz = timezone(timedelta(seconds=int(meta.get("gmtoffset") or 0)))
+    extra = {}
+    for i, t in enumerate(ts):
+        if q["close"][i] is None:
+            continue
+        d = datetime.fromtimestamp(int(t), tz).date().isoformat()
+        extra[d] = {"volume": q.get("volume", [None] * len(ts))[i], "adj_close": adj[i] if adj and i < len(adj) else None}
+    for b in bars:
+        b.update(extra.get(b["date"], {}))
+    t = meta.get("regularMarketTime")
+    return {"symbol": str(meta.get("symbol", "")).upper(), "name": meta.get("longName") or meta.get("shortName"),
+            "currency": meta.get("currency"), "exchange": meta.get("fullExchangeName") or meta.get("exchangeName"),
+            "instrument": meta.get("instrumentType"), "last": meta.get("regularMarketPrice"),
+            "prev_close": meta.get("chartPreviousClose"), "day_high": meta.get("regularMarketDayHigh"),
+            "day_low": meta.get("regularMarketDayLow"), "volume": meta.get("regularMarketVolume"),
+            "year_high": meta.get("fiftyTwoWeekHigh"), "year_low": meta.get("fiftyTwoWeekLow"),
+            "market_time": datetime.fromtimestamp(int(t), tz).isoformat(timespec="minutes") if t else None, "bars": bars}
+
+
+_US_SYMBOL = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+@guard
+def us_daily(symbol: str, *, rng: str = "1y", today: date | None = None, max_age_days: int = 7, store=None) -> Result:
+    """Daily bars for a US ticker (AAPL, BRK-B). Stored in us_price when a store is given; the bar dated today is dropped
+    (the US session may still be open)."""
+    sym = (symbol or "").strip().upper()
+    if not _US_SYMBOL.match(sym):
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"yahoo: bad US symbol {symbol!r}")
+    if rng not in _RANGES:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"yahoo: bad range {rng!r}")
+    got = get(URL.format(sym=quote(sym, safe=""), rng=rng), YAHOO, expect="json")
+    d = parse_us(got.body, sym)
+    t = (today or today_ist()).isoformat()
+    d["bars"] = [b for b in d["bars"] if b["date"] < t]
+    newest = check_fresh(d["bars"], "date", max_age_days, f"yahoo_us_{sym}", today=today or today_ist())
+    if store is not None:
+        from ..store.datasets import persist_us_prices
+        persist_us_prices(store, sym, d["bars"])
+    return Result(data=d, as_of=newest.isoformat(), sources=[got.source(SOURCE)])
+
+
+@guard
+def us_quote(symbol: str) -> Result:
+    sym = (symbol or "").strip().upper()
+    if not _US_SYMBOL.match(sym):
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"yahoo: bad US symbol {symbol!r}")
+    got = get(URL.format(sym=quote(sym, safe=""), rng="5d"), YAHOO, expect="json")
+    d = parse_us(got.body, sym)
+    if not d["last"]:
+        raise DrishtiError(ErrorKind.EMPTY, f"yahoo_us_{sym}: no price in the answer")
+    d.pop("bars")
+    return Result(data=d, as_of=(d["market_time"] or "")[:10] or None, sources=[got.source(SOURCE)])

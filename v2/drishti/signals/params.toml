@@ -46,6 +46,12 @@ denominator = "Nifty 50"
 ma_window = 20
 change_window = 60                  # provisional: trend window for "outperforming / lagging"
 
+[index_valuation]                   # source: ledger L3-5 (index PE / PB / yield); NSE's ind_close_all carries them daily
+indices = ["Nifty 50", "Nifty Midcap 150", "Nifty Smallcap 250"]
+cheap_percentile = 20.0             # PE at or below this percentile of its own stored history reads "cheap vs its history"
+rich_percentile = 80.0
+min_sessions_for_label = 250        # fewer stored sessions: the percentile is shown but marked provisional
+
 [cycle_phase]                       # source: v1:macro.md "ECONOMIC PHASE" rules; vote-count method is provisional
 late_brent_above = 88.0
 late_us10y_above = 4.5

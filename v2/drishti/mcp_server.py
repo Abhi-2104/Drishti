@@ -130,6 +130,7 @@ SIGNAL_TOOLS = {   # tool name -> (signal name, description). v1 names kept wher
     "get_seasonality": ("seasonality", "India calendar position: quarter theme, budget and monsoon stage, results season, next RBI MPC."),
     "get_cycle_phase": ("cycle_phase", "Partial cycle-phase probabilities (Recovery/Expansion/Late/Contraction) from v1 /macro rules; lists missing inputs."),
     "get_midcap_ratio": ("midcap_ratio", "Nifty Midcap 150 / Nifty 50 trend: midcaps outperforming or lagging."),
+    "get_index_valuation": ("index_valuation", "Nifty 50 / Midcap 150 / Smallcap 250 PE, PB, dividend yield, each against its own stored history."),
     "get_fii_dii": ("fii_dii", "Cash-market FII/DII net flows: today, 5 and 20 sessions, streaks. Confirmation, not thesis."),
     "get_liquidity": ("liquidity", "US liquidity: Fed balance sheet 13-week change and M2 year-on-year."),
     "get_credit_spreads": ("credit_spreads", "US high-yield spread level and 20-session change, plus the 10Y-2Y curve."),
@@ -247,6 +248,27 @@ def build_server(open_store: Callable[[], Store]):
         """NSDL-confirmed foreign portfolio investor flows per day (equity exchange / primary, debt, total; Rs crore and
         US$ mn). Lags NSE's provisional FII figure by a day; use both."""
         return _with(dt.fpi_flows, days=days)
+
+    @srv.tool()
+    def get_us_quote(ticker: str) -> dict:
+        """US stock quote (Yahoo, delayed). Also starts tracking the ticker's daily prices."""
+        return _with(dt.us_quote, ticker)
+
+    @srv.tool()
+    def get_us_fundamentals(ticker: str, as_of: str | None = None) -> dict:
+        """US company fundamentals from SEC XBRL filings: revenue, income, EPS, cash flow, balance sheet, growth, ROE,
+        leverage. `as_of` (YYYY-MM-DD) returns only what had been filed by that date."""
+        return _with(dt.us_fundamentals, ticker, as_of=as_of)
+
+    @srv.tool()
+    def get_us_filings(ticker: str) -> dict:
+        """Recent SEC filings (10-K, 10-Q, 8-K, Form 4 insider trades, proxy, 13F) with links."""
+        return _with(dt.us_filings, ticker)
+
+    @srv.tool()
+    def get_us_13f(filer: str) -> dict:
+        """An institution's latest 13F holdings (ticker such as BRK-B, or CIK number)."""
+        return _with(dt.us_13f, filer)
 
     @srv.tool()
     def get_market_today() -> dict:
