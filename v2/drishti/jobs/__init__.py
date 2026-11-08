@@ -17,7 +17,7 @@ from ..core.canary import IST
 from ..core.envelope import DrishtiError, ErrorKind, Result
 from ..providers import _util as u
 from .. import signals
-from ..providers import cftc, fred, mospi, nsdl, nse_archive, nse_corp, nse_flows, nse_pit, nse_shp, security_master, yahoo
+from ..providers import cftc, feeds, fred, mospi, nsdl, nse_archive, nse_corp, nse_flows, nse_pit, nse_shp, security_master, yahoo
 from ..signals import disclosure
 from ..store import datasets as ds
 from ..providers import bse as bse_provider
@@ -127,6 +127,29 @@ def _insider_persist(store: Store, res: Result) -> int:
     return store.upsert("insider_event", rows, ("event_key",))
 
 
+def _news_run(store: Store, today: date) -> Result:
+    """Fetch every configured feed, store the items not seen before and tag them. No sources configured is a valid, reported state."""
+    from ..config import load_settings
+    srcs = load_settings().news_sources
+    if not srcs:
+        return Result(data={"sources": 0, "new_items": 0, "failed": [], "note": "no news sources configured (settings.toml [[news_source]])"},
+                      as_of=today.isoformat())
+    seen_at = datetime.now(IST).isoformat(timespec="seconds")
+    new, tagged, failed, kinds, newest = 0, 0, [], [], None
+    for s in srcs:
+        r = feeds.fetch_feed(s.name, s.url)
+        if not r.ok:
+            failed.append(f"{s.name}: {r.error.kind}: {r.error.detail[:100]}")
+            kinds.append(r.error.kind)
+            continue
+        out = ds.persist_news(store, s.name, r.data["items"], seen_at)
+        new, tagged = new + out["new"], tagged + out["tagged"]
+        newest = max(newest or r.as_of, r.as_of)
+    if len(failed) == len(srcs):
+        return Result(error=DrishtiError(kinds[0], f"news: every source failed: {failed[:3]}"))
+    return Result(data={"sources": len(srcs), "new_items": new, "tagged": tagged, "failed": failed}, as_of=newest or today.isoformat())
+
+
 def _p(fn):
     return lambda store, res: fn(store, res.data)
 
@@ -213,6 +236,7 @@ STEPS = {
     **{f"yahoo_{x}": _yahoo(x) for x in yahoo.SYMBOLS},
     **{f"mospi_{k}": Step(f"mospi_{k}", lambda s, t, f=getattr(mospi, k): f(today=t), persist=lambda st, r: ds.persist_macro_bundle(st, r.data),
                           count=lambda r: sum(len(v) for v in r.data["series"].values())) for k in ("cpi", "wpi", "iip", "rbi_reserves")},
+    "news": Step("news", _news_run, count=lambda r: r.data["new_items"]),
     "cftc_tff": Step("cftc_tff", lambda s, t: cftc.cftc_tff(store=s, today=t), persist=_p(ds.persist_cftc)),
     "shp_master": Step("shp_master", lambda s, t: nse_shp.shp_master(store=s, today=t)),
     "security_master": Step("security_master", lambda s, t: security_master.build_security_master(s, today=t),
@@ -243,6 +267,8 @@ JOBS: dict[str, Job] = {j.name: j for j in (
     Job("macro_india", "18:10", "India CPI, WPI and IIP from MoSPI, RBI reserves from FRED (MoSPI's reserves table ended June 2025; "
         "a stale series is reported, not reused)",
         tuple(STEPS[f"mospi_{k}"] for k in ("cpi", "wpi", "iip")) + tuple(STEPS[f"fred_{x}"] for x in MONTHLY_FRED)),
+    Job("news", "07:05, every 2 h until 21:00", "Headlines from the RSS / Atom feeds listed in settings.toml (none by default); new items are stored and "
+        "tagged to companies by name or symbol", (STEPS["news"],)),
     Job("macro_weekly", "Sat 10:00", "Fed balance sheet, US M2, CFTC positioning",
         tuple(STEPS[f"fred_{x}"] for x in WEEKLY_FRED) + (STEPS["cftc_tff"],)),
     Job("shp_master", "07:45", "Shareholding-pattern master: promoter holding per company with QoQ change", (STEPS["shp_master"],)),

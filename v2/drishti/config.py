@@ -11,6 +11,7 @@ Layout (override everything with DRISHTI_HOME=<dir>, e.g. for tests or a second 
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,10 +58,20 @@ def reject_unknown(table: Mapping[str, Any], allowed: set[str], where: str, path
 
 
 @dataclass(frozen=True)
+class NewsSource:
+    name: str
+    url: str
+
+
+_NEWS_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+
+
+@dataclass(frozen=True)
 class Settings:
     config_dir: Path
     data_dir: Path
     sec_user_agent: str | None = None  # EDGAR requires contact info in the UA; never baked into code
+    news_sources: tuple[NewsSource, ...] = ()  # RSS / Atom feeds the investor chose; empty is a valid state
 
     @property
     def settings_path(self) -> Path:
@@ -90,7 +101,7 @@ class Settings:
         return Store(self.db_path)
 
 
-_SETTINGS_KEYS = {"data_dir", "sec_user_agent"}
+_SETTINGS_KEYS = {"data_dir", "sec_user_agent", "news_source"}
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -113,7 +124,28 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     ua = raw.get("sec_user_agent")
     if ua is not None and not isinstance(ua, str):
         raise ConfigError("sec_user_agent must be a string", path)
-    return Settings(config_dir=config_dir, data_dir=data_dir, sec_user_agent=(ua.strip() or None) if ua else None)
+    return Settings(config_dir=config_dir, data_dir=data_dir, sec_user_agent=(ua.strip() or None) if ua else None,
+                    news_sources=_news_sources(raw.get("news_source"), path))
+
+
+def _news_sources(raw, path: Path) -> tuple[NewsSource, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(x, dict) for x in raw):
+        raise ConfigError("news_source must be written as [[news_source]] tables", path)
+    out, names = [], set()
+    for i, x in enumerate(raw, 1):
+        reject_unknown(x, {"name", "url"}, f"[[news_source]] #{i}", path)
+        name, url = x.get("name"), x.get("url")
+        if not isinstance(name, str) or not _NEWS_NAME.match(name):
+            raise ConfigError(f"[[news_source]] #{i}: name must be 1-40 chars of a-z, 0-9, _ or -", path)
+        if not isinstance(url, str) or not url.lower().startswith("https://"):
+            raise ConfigError(f"[[news_source]] {name!r}: url must start with https://", path)
+        if name in names:
+            raise ConfigError(f"[[news_source]] name {name!r} appears twice", path)
+        names.add(name)
+        out.append(NewsSource(name, url.strip()))
+    return tuple(out)
 
 
 SETTINGS_TEMPLATE = """\
@@ -125,6 +157,12 @@ data_dir = ""
 # SEC EDGAR requires contact info in the User-Agent, e.g. "Your Name you@example.com".
 # Only needed for US filings; leave empty until then.
 sec_user_agent = ""
+
+# News: RSS 2.0 / Atom feeds you choose (headline, link, time and a short summary are stored; nothing is scraped).
+# The list is empty on purpose. Add one block per feed, names in lowercase letters, digits, - or _.
+# [[news_source]]
+# name = "example"
+# url = "https://example.com/feed.xml"
 """
 
 PROFILE_TEMPLATE = """\

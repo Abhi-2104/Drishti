@@ -157,6 +157,33 @@ def delivery(store, query: str, *, days: int = 60) -> Result:
 
 
 @guard
+def news(store, query: str | None = None, *, days: int = 3, limit: int = 50) -> Result:
+    """Stored headlines, newest first; with `query`, only items whose title or summary mention that company (a lexical tag:
+    `match_kind` and `matched` say what matched, it is not entity resolution)."""
+    ds.ensure(store, "news_item", "news_entity")
+    since = (today_ist() - timedelta(days=days)).isoformat()
+    limit = max(1, min(int(limit), 200))
+    if query:
+        m = company(store, query)
+        rows = store.query("SELECT i.source, i.published, i.title, i.link, i.summary, e.match_kind, e.matched FROM news_item i "
+                           "JOIN news_entity e ON e.source = i.source AND e.item_id = i.item_id WHERE e.isin = ? AND i.published >= ? "
+                           "ORDER BY i.published DESC LIMIT ?", (m["isin"], since, limit))
+        who = m["name"]
+    else:
+        rows = store.query("SELECT source, published, title, link, summary FROM news_item WHERE published >= ? ORDER BY published DESC LIMIT ?",
+                           (since, limit))
+        who = None
+    if not rows:
+        total = store.query("SELECT COUNT(*) AS n FROM news_item")[0]["n"]
+        raise DrishtiError(ErrorKind.EMPTY, (f"no stored headlines mention {who} in the last {days} days ({total} items stored)" if who and total else
+                                             f"no stored headlines in the last {days} days ({total} items stored)" if total else
+                                             "no news stored: no sources are configured, or the news job has not run (settings.toml [[news_source]])"))
+    return Result(data={"company": who, "items": rows,
+                        "note": "Tags are string matches on names / symbols in the headline and summary, not verified mentions."},
+                  as_of=rows[0]["published"][:10])
+
+
+@guard
 def india_macro(store, *, as_of: str | None = None) -> Result:
     """Latest stored India CPI, WPI, IIP and RBI reserves, each with its reference month, publication state and a stale flag.
     Only readings published by `as_of` count (reference-month end + the release lag in params.toml)."""

@@ -238,6 +238,11 @@ def build_server(open_store: Callable[[], Store]):
         return _with(dt.india_macro, as_of=as_of)
 
     @srv.tool()
+    def get_news(query: str | None = None, days: int = 3, limit: int = 50) -> dict:
+        """Headlines from the investor's own RSS / Atom feeds, newest first; with `query`, those mentioning one company (string-matched)."""
+        return _with(dt.news, query, days=days, limit=limit)
+
+    @srv.tool()
     def get_credit_ratings(query: str) -> dict:
         """Credit-rating actions for one company, with the earlier rating and whether it moved up or down the scale."""
         return _with(dt.credit_ratings, query)

@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS fii_dii_cash (
     "macro_series": """
 CREATE TABLE IF NOT EXISTS macro_series (
     series TEXT NOT NULL, obs_date TEXT NOT NULL, value REAL NOT NULL, source TEXT NOT NULL, PRIMARY KEY (series, obs_date))""",
+    "news_item": """
+CREATE TABLE IF NOT EXISTS news_item (
+    source TEXT NOT NULL, item_id TEXT NOT NULL, published TEXT NOT NULL, title TEXT NOT NULL, link TEXT, summary TEXT,
+    first_seen TEXT NOT NULL, PRIMARY KEY (source, item_id))""",
+    "news_entity": """
+CREATE TABLE IF NOT EXISTS news_entity (
+    source TEXT NOT NULL, item_id TEXT NOT NULL, isin TEXT NOT NULL, match_kind TEXT NOT NULL, matched TEXT NOT NULL,
+    PRIMARY KEY (source, item_id, isin))""",
     "cftc_tff": """
 CREATE TABLE IF NOT EXISTS cftc_tff (
     as_of TEXT NOT NULL, code TEXT NOT NULL, market TEXT, open_interest INTEGER,
@@ -183,6 +191,63 @@ def persist_fii_dii(store, data: dict, source: str = "nse_fiidii") -> int:
     f, d = data["fii"], data["dii"]
     return store.upsert("fii_dii_cash", [{"trade_date": data["date"], "fii_buy": f["buy"], "fii_sell": f["sell"], "fii_net": f["net"],
                                           "dii_buy": d["buy"], "dii_sell": d["sell"], "dii_net": d["net"], "source": source}], ("trade_date",))
+
+
+# --- news ------------------------------------------------------------------------------------------------------------
+_CORP_WORDS = re.compile(r"\b(limited|ltd\.?|corporation|corp\.?|company|co\.?|inc\.?|pvt\.?|private|the)\b", re.I)
+MIN_NAME_CHARS, MIN_SYMBOL_CHARS = 8, 4
+
+
+def _norm_name(name: str) -> str:
+    return re.sub(r"\s+", " ", _CORP_WORDS.sub(" ", re.sub(r"[^\w&' ]+", " ", name or ""))).strip().lower()
+
+
+def news_matcher(store) -> tuple[dict[str, str], dict[str, str]]:
+    """(normalised company name -> ISIN, NSE symbol -> ISIN) for listed equities. A name or symbol that belongs to two ISINs is left
+    out: a lexical tag must never pick between two companies. Names shorter than MIN_NAME_CHARS and symbols shorter than
+    MIN_SYMBOL_CHARS are too ambiguous in prose to be used."""
+    rows = store.query("SELECT isin, name, nse_symbol FROM security WHERE instrument_class = 'equity'") if store.query(
+        "SELECT 1 AS x FROM sqlite_master WHERE name = 'security'") else []
+    names: dict[str, set] = {}
+    syms: dict[str, set] = {}
+    for r in rows:
+        n = _norm_name(r["name"])
+        if len(n) >= MIN_NAME_CHARS:
+            names.setdefault(n, set()).add(r["isin"])
+        if r["nse_symbol"] and len(r["nse_symbol"]) >= MIN_SYMBOL_CHARS:
+            syms.setdefault(r["nse_symbol"], set()).add(r["isin"])
+    return ({k: next(iter(v)) for k, v in names.items() if len(v) == 1}, {k: next(iter(v)) for k, v in syms.items() if len(v) == 1})
+
+
+def tag_news_item(item: dict, names: dict[str, str], syms: dict[str, str]) -> list[dict]:
+    """Lexical tags for one item: a company name as a whole phrase (case-insensitive), or an NSE symbol written in capitals as a whole word,
+    found in the title or summary. This is string matching, not entity resolution: `match_kind` and `matched` say exactly what matched."""
+    text = f"{item['title']} {item.get('summary') or ''}"
+    low = " ".join(re.sub(r"[^\w&' ]+", " ", text).lower().split())
+    out: dict[str, dict] = {}
+    for phrase, isin in names.items():
+        if phrase in low and re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", low):
+            out.setdefault(isin, {"isin": isin, "match_kind": "name", "matched": phrase})
+    for sym, isin in syms.items():
+        if sym in text and re.search(rf"(?<![A-Za-z0-9]){re.escape(sym)}(?![A-Za-z0-9])", text):
+            out.setdefault(isin, {"isin": isin, "match_kind": "symbol", "matched": sym})
+    return list(out.values())
+
+
+def persist_news(store, source: str, items: list[dict], seen_at: str) -> dict:
+    """Store only items not seen before (first_seen is kept), tag the new ones, report {new, known, tagged}."""
+    ensure(store, "news_item", "news_entity")
+    have = {r["item_id"] for r in store.query("SELECT item_id FROM news_item WHERE source=?", (source,))}
+    fresh = [i for i in items if i["item_id"] not in have]
+    if not fresh:
+        return {"new": 0, "known": len(items), "tagged": 0}
+    store.upsert("news_item", [{"source": source, "item_id": i["item_id"], "published": i["published"], "title": i["title"], "link": i["link"],
+                                "summary": i["summary"], "first_seen": seen_at} for i in fresh], ("source", "item_id"))
+    names, syms = news_matcher(store)
+    tags = [{"source": source, "item_id": i["item_id"], **t} for i in fresh for t in tag_news_item(i, names, syms)]
+    if tags:
+        store.upsert("news_entity", tags, ("source", "item_id", "isin"))
+    return {"new": len(fresh), "known": len(items) - len(fresh), "tagged": len({t["item_id"] for t in tags})}
 
 
 def persist_macro(store, series: str, rows: Iterable[dict], source: str) -> int:
