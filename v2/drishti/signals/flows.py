@@ -102,10 +102,14 @@ def options_flow(store, on=None, symbol: str = "NIFTY"):
     top = lambda t: sorted((r for r in near if r["option_type"] == t), key=lambda r: -(r["oi"] or 0))[:p["walls"]]  # noqa: E731
     walls_ce = [{"strike": r["strike"], "oi": r["oi"], "oi_change": r["oi_change"]} for r in top("CE")]
     walls_pe = [{"strike": r["strike"], "oi": r["oi"], "oi_change": r["oi_change"]} for r in top("PE")]
-    label = "put-heavy" if pcr > p["pcr_bullish_above"] else "call-heavy" if pcr < p["pcr_bearish_below"] else "balanced"
     from .market import percentile_of
     hist = pcr_history(store, symbol, d)
     pctl = percentile_of(pcr, hist)
+    if p.get("label_by", "fixed") == "percentile" and pctl is not None:
+        q = p["extreme_percentile"]
+        label = "put-heavy" if pctl >= 100 - q else "call-heavy" if pctl <= q else "balanced"
+    else:
+        label = "put-heavy" if pcr > p["pcr_bullish_above"] else "call-heavy" if pcr < p["pcr_bearish_below"] else "balanced"
     comps = [Component("PCR (nearest expiry, OI)", pcr, d, f">{p['pcr_bullish_above']} put-heavy, <{p['pcr_bearish_below']} call-heavy (provisional)"),
              Component("PCR percentile vs own history", pctl, d, f"share of the last {len(hist)} sessions at or below today"),
              Component("PCR (all expiries, OI)", pcr_all, d), Component("max pain", mp, d, "nearest expiry"),

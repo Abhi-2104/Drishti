@@ -87,6 +87,7 @@ def _date(as_of: str | None) -> date | None:
 def tool_signal(store: Store, name: str, as_of: str | None = None, query: str | None = None) -> dict:
     """Compute one signal from stored data up to `as_of` (default today). Single-name signals need `query`."""
     from . import signals
+    from .signals.base import SettingsError
     try:
         on = _date(as_of)
         kw = {}
@@ -100,8 +101,10 @@ def tool_signal(store: Store, name: str, as_of: str | None = None, query: str | 
                 raise DrishtiError(ErrorKind.PARSE_FAIL, f"{query!r} matches several companies, pass an ISIN: "
                                                          f"{[m['name'] + ' (' + m['isin'] + ')' for m in r.data['matches']]}")
             m = r.data["matches"][0]
-            kw = {"isin": m["isin"]} if name == "pledge" else {"isin": m["isin"], "symbol": m["nse_symbol"]}
+            kw = {"isin": m["isin"]} if name in ("pledge", "price_context") else {"isin": m["isin"], "symbol": m["nse_symbol"]}
         return _env(signals.compute(store, name, on, **kw))
+    except SettingsError as e:
+        return _env(Result(error=DrishtiError(ErrorKind.PARSE_FAIL, f"signal-settings.toml: {e}")))
     except ValueError as e:
         return _env(Result(error=DrishtiError(ErrorKind.PARSE_FAIL, f"bad as_of date: {e}")))
     except KeyError:
@@ -196,8 +199,76 @@ def build_server(open_store: Callable[[], Store]):
         with open_store() as st:
             return tool_disclosure_screen(st, as_of)
 
+    from . import data_tools as dt
+
+    def _with(fn, *a, **k):
+        with open_store() as st:
+            return _env(fn(st, *a, **k))
+
+    @srv.tool()
+    def get_fundamentals(query: str, refresh: bool = False) -> dict:
+        """Screener fundamentals for one company: quarterly results, annual P&L, balance sheet, cash flow, ratios, shareholding,
+        concall/annual-report links, plus ROCE/ROE/debt-equity/OCF-vs-profit/growth. Rs crore. Cached for 7 days."""
+        return _with(dt.fundamentals, query, refresh=refresh)
+
+    @srv.tool()
+    def get_quote(query: str) -> dict:
+        """Live or delayed quote (NSE, with BSE as a cross-check; BSE for BSE-only names). `live` says whether the market is open."""
+        return _with(dt.quote, query)
+
+    @srv.tool()
+    def get_announcements(query: str, days: int = 30) -> dict:
+        """One company's filings from NSE and BSE, merged and de-duplicated, newest first, with PDF links."""
+        return _with(dt.announcements, query, days=days)
+
+    @srv.tool()
+    def get_corporate_actions(query: str) -> dict:
+        """Dividends, splits, bonuses, rights, buybacks for one company (stored since the eod_corporate job runs)."""
+        return _with(dt.corporate_actions, query)
+
+    @srv.tool()
+    def get_credit_ratings(query: str) -> dict:
+        """Credit-rating actions for one company, with the earlier rating and whether it moved up or down the scale."""
+        return _with(dt.credit_ratings, query)
+
+    @srv.tool()
+    def get_deals(query: str, days: int = 90) -> dict:
+        """Bulk, block and short-selling deals in one company's shares over the last `days` days."""
+        return _with(dt.deals, query, days=days)
+
+    @srv.tool()
+    def get_calendar(query: str | None = None, days: int = 30) -> dict:
+        """Upcoming board meetings (results dates, dividends, fund raising) from NSE and BSE. One company with `query`,
+        else the whole market, for the next `days` days."""
+        return _with(dt.calendar, query, days=days)
+
+    @srv.tool()
+    def get_fpi_flows(days: int = 10) -> dict:
+        """NSDL-confirmed foreign portfolio investor flows per day (equity exchange / primary, debt, total; Rs crore and
+        US$ mn). Lags NSE's provisional FII figure by a day; use both."""
+        return _with(dt.fpi_flows, days=days)
+
+    @srv.tool()
+    def get_market_today() -> dict:
+        """Pre-market page: Gift Nifty vs the last Nifty close, open/upcoming IPOs, next F&O expiries, next holidays."""
+        return _with(dt.market_today)
+
+    @srv.tool()
+    def get_price_context(query: str, as_of: str | None = None) -> dict:
+        """One company's price facts: returns, 52-week range, 20/50/200-day averages, ATR, volume, strength vs the Nifty."""
+        with open_store() as st:
+            return tool_signal(st, "price_context", as_of, query)
+
+    @srv.tool()
+    def get_option_chain(symbol: str = "NIFTY", expiry: str | None = None) -> dict:
+        """Intraday option chain for an index and expiry (default nearest). Live in market hours; closing state after."""
+        from .providers import nse_quote
+        return _env(nse_quote.option_chain(symbol.upper(), expiry))
+
     return srv
 
 
-def serve(db_path) -> None:
+def serve(db_path, signal_settings=None) -> None:
+    from .signals.base import use_settings
+    use_settings(signal_settings)
     build_server(lambda: Store(db_path)).run("stdio")

@@ -31,7 +31,7 @@ from drishti.core.canary import IST, check_fresh, parse_date, today_ist
 from drishti.core.envelope import DrishtiError, ErrorKind
 from drishti.core.fetch import HONEST_UA, Profile, browser_headers
 
-ALL_GROUPS = ("archive", "nse_live", "shp", "bse", "macro", "screener", "sec")
+ALL_GROUPS = ("archive", "nse_live", "shp", "bse", "macro", "screener", "sec", "batch3")
 
 # --- per-source profiles (UA decided per source; see plan section 2) --------------------------------
 NSE = Profile("nse", browser_headers({"Referer": "https://www.nseindia.com/"}), timeout=(5.0, 20.0))
@@ -381,6 +381,49 @@ def grp_sec(run: Run, sec_ua: str | None) -> None:
     grab(run, "sec_submissions_aapl", "sec", "submissions_AAPL.json", "https://data.sec.gov/submissions/CIK0000320193.json", prof, "json")
 
 
+def grp_batch3(run: Run, td: date) -> None:
+    """Endpoints not captured in Phase 0 (8 Nov). URLs from the maintained NseIndiaApi / BseIndiaApi libraries; NSDL and
+    BSE deals are probes (the result says whether they work)."""
+    n = warm_nse()
+    run.note(f"NSE session cookies after warm-up: {n}" + ("  (EMPTY JAR: expect failures)" if n == 0 else ""))
+    today = today_ist()
+    wk = f"from_date={d_dash(today - timedelta(days=7))}&to_date={d_dash(today + timedelta(days=30))}"
+    past = f"from={d_dash(today - timedelta(days=30))}&to={d_dash(today)}"
+
+    def g(name, filename, path, **kw):
+        return grab(run, name, "batch3", filename, API + path, NSE, "json", on_blocked=warm_nse, **kw)
+
+    g("nse_board_meetings", "nse_board_meetings.json", f"corporate-board-meetings?index=equities&{wk}", note="L0-2 event calendar")
+    g("nse_event_calendar", "nse_event_calendar.json", "event-calendar?index=equities", note="probe: v1 era endpoint")
+    g("nse_financial_results", "nse_financial_results.json",
+      f"corporates-financial-results?index=equities&period=Quarterly&from_date={d_dash(today - timedelta(days=14))}&to_date={d_dash(today)}",
+      note="results filings with filing dates (point-in-time fundamentals)")
+    for opt in ("bulk_deals", "block_deals", "short_selling"):
+        g(f"nse_hist_{opt}", f"nse_hist_{opt}.json", f"historicalOR/bulk-block-short-deals?optionType={opt}&{past}",
+          note="365-day history of deals (backfill)")
+    one = f"from={d_dash(td)}&to={d_dash(td)}"
+    for opt in ("bulk_deals", "short_selling"):     # the JSON answer stops at 70 rows; does the CSV download?
+        grab(run, f"nse_hist_{opt}_csv", "batch3", f"nse_hist_{opt}_csv.csv",
+             API + f"historicalOR/bulk-block-short-deals?optionType={opt}&{one}&csv=true", NSE, "csv", on_blocked=warm_nse,
+             note="probe: CSV download of one day, compare the row count with the large-deals snapshot")
+    g("nse_announcements_7d", "nse_announcements_7d.json",
+      f"corporate-announcements?index=equities&from_date={d_dash(today - timedelta(days=7))}&to_date={d_dash(today)}",
+      note="does the date range return more than the latest 20?")
+    bse_api = "https://api.bseindia.com/BseIndiaAPI/api"
+    grab(run, "bse_corp_actions", "batch3", "bse_corp_actions.json",
+         f"{bse_api}/DefaultData/w?ddlcategorys=E&ddlindustrys=&segment=0&strSearch=D&Fdate={d_ymd(today - timedelta(days=7))}&TDate={d_ymd(today + timedelta(days=30))}",
+         BSE_API, "json", note="L4-9 BSE corporate actions (ex-date range)")
+    grab(run, "bse_result_calendar", "batch3", "bse_result_calendar.json",
+         f"{bse_api}/Corpforthresults/w?fromdate={d_ymd(today)}&todate={d_ymd(today + timedelta(days=30))}", BSE_API, "json",
+         note="L0-2 BSE results calendar")
+    for name, url in (("bse_bulk_probe_1", f"{bse_api}/BulkDealData/w?Fdate={d_ymd(td)}&TDate={d_ymd(td)}"),
+                      ("bse_bulk_probe_2", "https://www.bseindia.com/markets/equity/EQReports/bulk_deals.aspx")):
+        grab(run, name, "batch3", f"{name}.{'json' if 'api.' in url else 'html'}", url, BSE_API if "api." in url else BSE_WWW,
+             "json" if "api." in url else "html", note="L2-7 probe: BSE bulk/block endpoint unknown")
+    grab(run, "nsdl_fpi_latest", "batch3", "nsdl_fpi_latest.html", "https://www.fpi.nsdl.co.in/web/Reports/Latest.aspx",
+         Profile("nsdl", browser_headers(), timeout=(5.0, 30.0)), "html", note="L2-2 NSDL FPI daily (probe)")
+
+
 def last_weekday(d: date) -> date:
     while d.weekday() >= 5:
         d -= timedelta(days=1)
@@ -422,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
         grp_screener(run)
     if "sec" in groups:
         grp_sec(run, args.sec_ua)
+    if "batch3" in groups:
+        grp_batch3(run, td)
 
     ok = [i for i in run.items if i["ok"]]
     bad = [i for i in run.items if not i["ok"]]

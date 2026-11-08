@@ -1,0 +1,46 @@
+# Drishti signal settings for this install. Each brother keeps his own copy.
+#
+# How to use: every setting below is commented out, so the shipped defaults apply. To change one, remove the "#" in
+# front of it, change the number, save. To go back to the default, put the "#" back. Every signal reading shows the
+# settings version it used, so you can always tell which numbers produced it. A misspelt name is refused, not ignored.
+# Plain-English meaning of each signal: docs/SIGNALS.md
+
+[participant_oi]
+# label_by = "percentile"      # "percentile": "strong" means extreme compared with the last year (recommended)
+#                              # "fixed": v1's rule, strong when |score| >= strong_threshold
+# strong_percentile = 20.0     # percentile mode: bottom 20% of the year = strong bearish, top 20% = strong bullish
+# strong_threshold = 4         # fixed mode: the v1 threshold
+
+[options_flow]
+# label_by = "fixed"           # "fixed": PCR above/below the two levels below; "percentile": extreme vs its own past
+# pcr_bullish_above = 1.3      # PCR above this = put-heavy
+# pcr_bearish_below = 0.7      # PCR below this = call-heavy
+# extreme_percentile = 15.0    # percentile mode: top/bottom 15% of the past = put-heavy / call-heavy
+
+[insider_cluster]
+# window_days = 90             # how far back to look at insider trades
+# cluster_days = 30            # a "cluster" = this many days...
+# cluster_min_persons = 3      # ...with at least this many different insiders on the same side
+# size_buy_crore = 1.0         # open-market insider buying of at least this many crore = "size buying"
+
+[pledge]
+# strong_caution_pledged_pct = 25.0   # more than this % of promoter shares pledged = strong caution
+# rising_min_pp = 1.0                 # pledged % up by at least this many points in a quarter = rising pledge
+
+[macro_regime]
+# dxy_bearish_above = 104.0    # dollar index above this = bearish for India
+# dxy_bullish_below = 100.0
+# us10y_bearish_above = 4.5    # US 10-year yield (%)
+# us10y_bullish_below = 3.8
+# brent_bearish_above = 90.0   # Brent crude ($)
+# brent_bullish_below = 75.0
+# india_vix_bearish_above = 20.0
+# india_vix_bullish_below = 14.0
+
+[fii_dii]
+# short_window = 5             # sessions for the short FII/DII total
+# long_window = 20             # sessions for the long total
+
+[credit_spreads]
+# widening_bp = 50.0           # high-yield spread up this many basis points in `window` sessions = stress building
+# stress_level_pct = 5.0       # or a spread level at/above this %

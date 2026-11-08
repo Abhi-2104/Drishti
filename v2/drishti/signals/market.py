@@ -65,13 +65,14 @@ def participant_oi(store, on=None, *, with_history: bool = True):
     thr = p["strong_threshold"]
     if smart >= thr:
         interp = f"Strong bullish: institutions (FII+Pro) positioned long while retail (Client) is short (score +{smart})."
-        label = "strong bullish"
+        v1_label = "strong bullish"
     elif smart <= -thr:
         interp = f"Strong bearish: institutions positioned short while retail is long (score {smart})."
-        label = "strong bearish"
+        v1_label = "strong bearish"
     else:
         interp = f"No strong smart-money vs retail divergence (score {smart})."
-        label = "no strong divergence"
+        v1_label = "no strong divergence"
+    label = v1_label
     pctl, hist_n = None, 0
     if with_history:   # where today sits in its own past: the read that discriminates when the raw score is persistently one-sided
         past = [r["trade_date"] for r in store.query("SELECT DISTINCT trade_date FROM participant_oi WHERE trade_date < ? "
@@ -82,11 +83,19 @@ def participant_oi(store, on=None, *, with_history: bool = True):
         comps.append(Component("percentile vs own history", pctl, d0, f"share of the last {hist_n} sessions at or below today's score", None,
                                "unknown (under 20 sessions stored)" if pctl is None else
                                f"today's {smart} is at the {pctl:.0f}th percentile (low = more bearish than usual)"))
+    if with_history and p.get("label_by", "fixed") == "percentile":
+        if pctl is None:
+            missing.append("percentile labelling needs 20+ stored sessions; showing the v1 fixed-threshold label")
+        else:
+            q = p["strong_percentile"]
+            label = ("strong bearish vs its own history" if pctl <= q else "strong bullish vs its own history" if pctl >= 100 - q
+                     else "within its normal range") + f" (v1 rule: {v1_label})"
     return ok(Signal("participant_oi", d0, smart, label, comps, missing,
                      "FII/Pro = smart money (usually right); Client = retail (contrarian); DII ignored for F&O direction. "
                      "Change vs prior trading day. Score = (FII + Pro) - Client, range -18..+18.",
                      ver, details={"interpretation": interp, "participant_scores": scores, "stance": stance,
-                                   "prior_date": prior[0] if prior else None, "percentile": pctl, "history_sessions": hist_n}))
+                                   "prior_date": prior[0] if prior else None, "percentile": pctl, "history_sessions": hist_n,
+                                   "v1_label": v1_label, "label_by": p.get("label_by", "fixed")}))
 
 
 # --- sector rotation (v1: sectorRotation.ts) ------------------------------------------------------------

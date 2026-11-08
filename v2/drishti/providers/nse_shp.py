@@ -33,6 +33,7 @@ CTX_PROMOTER = "ShareholdingOfPromoterAndPromoterGroup_ContextI"
 CTX_PUBLIC = "PublicShareholding_ContextI"
 CTX_NPNP = "SharesHeldByNonPromoterNonPublicShareholders_ContextI"
 CTX_TOTAL = "ShareholdingPattern_ContextI"
+CTX_DR = "CustodianOrDRHolder_ContextI"   # C1: shares behind ADRs/GDRs, outside SEBI's percentage base
 _HOLDER = re.compile(r"^(?P<cat>.+)_Context(?P<n>\d+)$")
 _FLAGS = {"pledged": "WhetherAnySharesHeldByPromotersAreEncumberedUnderPledged",
           "ndu": "WhetherAnySharesHeldByPromotersAreEncumberedUnderNonDisposalUndertaking",
@@ -79,9 +80,15 @@ def parse_shp_filing(xml: bytes) -> dict:
         raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: nonsensical share counts total={total} promoter={prom} public={pub}")
     if not _close(prom + pub + npnp, total):
         raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: promoter {prom} + public {pub} + non-promoter-non-public {npnp} != total {total}")
+    # SEBI's percentages exclude shares held by the depository-receipt custodian (category C1: Infosys, M&M, SBI, ...),
+    # so the base is total - C1. With no DRs the two are the same.
+    dr = _i(ctx.get(CTX_DR, {}), "NumberOfShares") or 0
+    if dr < 0 or dr > npnp:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: depository-receipt shares {dr} outside non-promoter-non-public {npnp}")
+    base = total - dr
     pc = _frac(pr, "ShareholdingAsAPercentageOfTotalNumberOfShares")
-    if pc is not None and abs(pc - prom / total) > PCT_TOL:
-        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: reported promoter holding {pc} disagrees with {prom}/{total}")
+    if pc is not None and abs(pc - prom / base) > PCT_TOL and abs(pc - prom / total) > PCT_TOL:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: reported promoter holding {pc} disagrees with {prom}/{base} (and /{total})")
 
     pledged, ndu, other = (_i(pr, "NumberOfSharesEncumberedUnderPledged"), _i(pr, "NumberOfSharesEncumberedUnderNonDisposalUndertaking"),
                            _i(pr, "NumberOfSharesEncumberedUnderOtherEncumbrances"))
@@ -97,8 +104,8 @@ def parse_shp_filing(xml: bytes) -> dict:
     if prom and rep_p is not None and abs(rep_p - enc_total / prom) > PCT_TOL:
         raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: reported encumbered share {rep_p} disagrees with {enc_total}/{prom}; definition changed?")
     rep_t = _frac(ctx[CTX_TOTAL], "EncumberedSharesHeldAsPercentageOfTotalNumberOfShares")
-    if rep_t is not None and abs(rep_t - enc_total / total) > PCT_TOL:
-        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: reported encumbered share of total {rep_t} disagrees with {enc_total}/{total}")
+    if rep_t is not None and abs(rep_t - enc_total / base) > PCT_TOL and abs(rep_t - enc_total / total) > PCT_TOL:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: reported encumbered share of total {rep_t} disagrees with {enc_total}/{base}")
 
     declared = {k: main.get(v, "").strip().lower() == "true" for k, v in _FLAGS.items()}
     holders = _holders(ctx)
@@ -108,10 +115,11 @@ def parse_shp_filing(xml: bytes) -> dict:
         "isin": isin or None, "isin_valid": is_valid_isin(isin), "symbol": u.opt_str(main.get("Symbol")),
         "scrip_code": u.opt_str(main.get("ScripCode")), "company": u.opt_str(main.get("NameOfTheCompany")),
         "as_on": u.iso_date(main["DateOfReport"], f"{label}.DateOfReport"), "form_version": version,
-        "total_shares": total, "promoter_shares": prom, "promoter_pct": pct(prom, total), "public_pct": pct(pub, total),
+        "total_shares": total, "promoter_shares": prom, "dr_shares": dr,
+        "promoter_pct": pct(prom, base), "public_pct": pct(pub, base),
         "pledged_shares": pledged or 0, "ndu_shares": ndu or 0, "other_encumbered_shares": other or 0, "encumbered_shares": enc_total,
         "encumbered_pct_of_promoter": pct(enc_total, prom), "pledged_pct_of_promoter": pct(pledged or 0, prom),
-        "encumbered_pct_of_total": pct(enc_total, total),
+        "encumbered_pct_of_total": pct(enc_total, base),
         "declared_pledged": declared["pledged"], "declared_ndu": declared["ndu"], "declared_other": declared["other"],
         "flags_consistent": any(declared.values()) == (enc_total > 0),  # box ticked iff shares are encumbered
         "no_promoter": prom == 0, "holders": holders, "holders_reconcile": _close(sum(h["shares"] for h in holders), prom),
@@ -280,6 +288,9 @@ def shp_master_rows(*, days: int, today: date | None = None) -> Result:
 @guard
 def shp_filing(xbrl_url: str) -> Result:
     """Promoter holding and encumbrance (pledge / NDU / other) from one company's filing."""
+    if not xbrl_url or xbrl_url.rstrip("/").endswith(("/-", "xbrl")) or xbrl_url.strip() == "-":
+        # NSE lists some filings with no XBRL file at all (TIINDIA, June 2026 quarter: link '.../xbrl/-')
+        raise DrishtiError(ErrorKind.NOT_FOUND, f"NSE published no XBRL file for this filing (link {xbrl_url!r})")
     got = get(xbrl_url, NSE_ARCHIVE, expect="xml")
     data = parse_shp_filing(got.body)
     return Result(data=data, as_of=data["as_on"], sources=[got.source(SOURCE)])

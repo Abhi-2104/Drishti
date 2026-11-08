@@ -140,6 +140,13 @@ class Store:
             self._db.commit()
         return len(rows)
 
+    def delete_where(self, table: str, where: str, params: Sequence[Any]) -> int:
+        """DELETE FROM table WHERE <where> with bound parameters; `where` is written by code, never by data."""
+        _ident(table)
+        if ";" in where:
+            raise ValueError("one condition only")
+        return self._run(f"DELETE FROM {table} WHERE {where}", params).rowcount
+
     # --- raw blobs / fetch-once ---------------------------------------------------------------------
     def put_blob(self, dataset: str, trade_date: date | str, fetched: Fetched, source: str, *, keep_body: bool = True) -> str:
         sha = hashlib.sha256(fetched.body).hexdigest()

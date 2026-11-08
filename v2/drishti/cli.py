@@ -4,7 +4,16 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .config import ConfigError, load_settings, write_templates
+from .config import ConfigError, write_templates
+from .config import load_settings as _load_settings
+
+
+def load_settings():
+    """Settings, plus this install's signal-settings.toml applied to every signal computed in this process."""
+    cfg = _load_settings()
+    from .signals.base import use_settings
+    use_settings(cfg.signal_settings_path)
+    return cfg
 
 
 def _todo(what: str) -> int:
@@ -33,6 +42,10 @@ def main(argv: list[str] | None = None) -> int:
     sg.add_argument("--query", default=None, help="company for single-name signals: ISIN, symbol or BSE scrip code")
     sg.add_argument("--replay", type=int, default=None, help="recompute for each of the last N weekdays and print a table")
     sg.add_argument("--summary", action="store_true", help="with --replay: print only the distribution (label counts, score percentiles)")
+    dp = sub.add_parser("data", help="look up stored/live data: fundamentals | quote | announcements | actions | ratings | deals | today | calendar | fpi")
+    dp.add_argument("what")
+    dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
+    dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
     sub.add_parser("init", help="create the settings/profile templates (never overwrites)")
     sub.add_parser("paths", help="show where settings, profile and the database live")
     args = ap.parse_args(argv)
@@ -48,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
                     print("nothing to do: settings and profile already exist")
             print(f"settings : {cfg.settings_path}")
             print(f"profile  : {cfg.profile_path}")
+            print(f"signals  : {cfg.signal_settings_path}")
             print(f"database : {cfg.db_path}")
         except ConfigError as e:
             print(f"drishti {args.cmd}: {e}", file=sys.stderr)
@@ -79,8 +93,30 @@ def main(argv: list[str] | None = None) -> int:
         except ModuleNotFoundError as e:
             print(f"drishti mcp: the MCP SDK is not installed ({e}); run `uv sync`", file=sys.stderr)
             return 2
-        serve(cfg.db_path)    # stdout belongs to the protocol: everything else logs to stderr
+        serve(cfg.db_path, cfg.signal_settings_path)    # stdout belongs to the protocol: everything else logs to stderr
         return 0
+    if args.cmd == "data":
+        import json as _json
+        from . import data_tools as dt
+        from .store import Store
+        fns = {"fundamentals": lambda st: dt.fundamentals(st, args.query, refresh=args.refresh), "quote": lambda st: dt.quote(st, args.query),
+               "announcements": lambda st: dt.announcements(st, args.query), "actions": lambda st: dt.corporate_actions(st, args.query),
+               "ratings": lambda st: dt.credit_ratings(st, args.query), "deals": lambda st: dt.deals(st, args.query),
+               "today": lambda st: dt.market_today(st), "calendar": lambda st: dt.calendar(st, args.query),
+               "fpi": lambda st: dt.fpi_flows(st)}
+        if args.what not in fns or (args.what not in ("today", "calendar", "fpi") and not args.query):
+            print(f"drishti data: use one of {', '.join(fns)} (all but 'today', 'calendar', 'fpi' need --query)", file=sys.stderr)
+            return 2
+        cfg = load_settings()
+        with Store(cfg.db_path) as st:
+            r = fns[args.what](st)
+        out = r.to_dict()
+        if args.what == "fundamentals" and r.data:
+            out["data"] = {k: v for k, v in r.data.items() if k != "tables"}
+            out["data"]["tables"] = {k: {"periods": v["periods"][-4:], "rows": list(v["rows"])} for k, v in r.data.get("tables", {}).items()}
+            out["data"]["documents"] = {k: v[:4] for k, v in r.data.get("documents", {}).items()}
+        print(_json.dumps(out, indent=1, default=str)[:6000])
+        return 0 if r.ok else 1
     if args.cmd in ("backfill", "signal"):
         from .store import Store
         try:
@@ -186,7 +222,7 @@ def _signal(st, args) -> int:
             print(f"drishti signal: cannot resolve {args.query!r}: {rr.error.detail if not rr.ok else 'several companies match'}", file=sys.stderr)
             return 2
         m = rr.data["matches"][0]
-        kw = {"isin": m["isin"]} if args.name == "pledge" else {"isin": m["isin"], "symbol": m["nse_symbol"]}
+        kw = {"isin": m["isin"]} if args.name in ("pledge", "price_context") else {"isin": m["isin"], "symbol": m["nse_symbol"]}
     try:
         r = signals.compute(st, args.name, on, **kw)
     except KeyError:

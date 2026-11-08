@@ -19,6 +19,7 @@ _FORMATS = (
     "%d-%b-%Y %H:%M:%S", "%d-%b-%Y %H:%M", "%d-%b-%Y",
     "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d",
     "%d-%m-%Y", "%d/%m/%Y", "%Y%m%d",
+    "%d %b %Y",                       # BSE corporate actions / results calendar: '09 Nov 2026'
 )
 
 

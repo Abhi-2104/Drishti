@@ -41,6 +41,14 @@ def api_get(path: str, **params: Any) -> Fetched:
     return _fetch.get(url, NSE, expect="json", on_blocked=warm)
 
 
+def api_get_text(path: str, expect: str = "csv", **params: Any) -> Fetched:
+    """Same as api_get for endpoints that answer with a file (the site's 'Download CSV' buttons)."""
+    if len(_fetch.session(NSE).cookies) == 0:
+        warm()
+    url = API + path + (("?" + urlencode(params)) if params else "")
+    return _fetch.get(url, NSE, expect=expect, on_blocked=warm)
+
+
 def rows_of(body: bytes, label: str) -> list[dict]:
     """The row list inside an NSE JSON payload: a bare list, or {"data": [...]}. Anything else is PARSE_FAIL."""
     try:

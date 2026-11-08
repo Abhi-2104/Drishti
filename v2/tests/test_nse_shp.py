@@ -150,6 +150,29 @@ def test_missing_promoter_section_is_not_accepted_when_the_register_does_not_add
     assert kind(s.parse_shp_filing, body) == ErrorKind.PARSE_FAIL
 
 
+def test_depository_receipt_shares_sit_outside_the_percentage_base():
+    """SEBI's percentages exclude shares behind ADRs/GDRs (custodian, C1). Infosys reports promoters at 13.90%, which is
+    516,677,914 / (4,058,276,578 - 342,234,972), not / 4,058,276,578 (12.73%)."""
+    f = s.parse_shp_filing(xml("INFY"))
+    assert f["dr_shares"] == 342234972 and f["total_shares"] == 4058276578
+    assert f["promoter_pct"] == 13.904 and f["public_pct"] == 85.883
+    assert s.parse_shp_filing(xml("20MICRONS"))["dr_shares"] == 0
+
+
+def test_depository_receipt_base_carries_through_to_encumbrance():
+    f = s.parse_shp_filing(xml("INDUSINDBK"))
+    assert f["dr_shares"] > 0 and f["encumbered_shares"] > 0
+    base = f["total_shares"] - f["dr_shares"]
+    assert f["encumbered_pct_of_total"] == round(f["encumbered_shares"] / base * 100, 4)
+
+
+def test_depository_receipt_count_cannot_exceed_its_category():
+    body = xml("INFY").replace(b'NumberOfShares contextRef="CustodianOrDRHolder_ContextI" decimals="INF" unitRef="shares">342234972<',
+                               b'NumberOfShares contextRef="CustodianOrDRHolder_ContextI" decimals="INF" unitRef="shares">999999999<')
+    assert body != xml("INFY")
+    assert kind(s.parse_shp_filing, body) == ErrorKind.PARSE_FAIL
+
+
 def test_broken_filings():
     for body in (b"nope", b'<?xml version="1.0"?><!DOCTYPE a [<!ENTITY x "y">]><a/>', b'<?xml version="1.0"?><r/>'):
         assert kind(s.parse_shp_filing, body) == ErrorKind.PARSE_FAIL
@@ -340,7 +363,11 @@ def test_validate_live_runs_end_to_end_on_fakes(monkeypatch, tmp_path, capsys):
         data={"securities": 5, "stats": {"bse_file_date": "2026-11-06", "by_listing": {}, "by_class": {}, "nse_equities": 4, "nse_equities_seen_on_bse": 3,
                                           "overlap": 0.75, "skipped_from_bse": {}, "rejected": 0, "conflicts": 0, "symbol_differs": 0, "warnings": []},
               "conflicts": [], "rejected": []}, as_of="2026-11-06"))
-    assert vl.main(["--shp-sample", "3"]) == 0
+    for n in ("announcements", "corporate_actions", "credit_ratings", "large_deals", "ipos", "holidays", "expiries", "market_status"):
+        monkeypatch.setattr(vl.nse_corp, n, lambda *a, **k: Result(error=DrishtiError(ErrorKind.BLOCKED, "fake")))
+    monkeypatch.setattr(vl.bse, "announcements", lambda *a, **k: Result(error=DrishtiError(ErrorKind.BLOCKED, "fake")))
+    assert vl.main(["--shp-sample", "3", "--only", "archive", "--only", "bse", "--only", "pit", "--only", "shp", "--only", "macro",
+                    "--only", "master"]) == 0
     out = capsys.readouterr().out
     assert "security_master" in out and "fii_dii_cash" in out and "cftc_tff" in out and "fred_WALCL" in out
     assert "OK   shp_master" in out and "shp_filings" in out and "insider_trades_7d" in out and "0 failed" in out
@@ -358,3 +385,10 @@ def test_validate_live_reports_failures_and_exits_nonzero(monkeypatch, tmp_path,
     assert vl.main(["--only", "shp", "--shp-sample", "3"]) == 1
     out = capsys.readouterr().out
     assert "FAIL shp_filings" in out and "no promoter context" in out
+
+
+def test_filing_listed_without_an_xbrl_file_is_named_not_fetched(monkeypatch):
+    called = []
+    monkeypatch.setattr(s, "get", lambda *a, **k: called.append(a))
+    r = s.shp_filing("https://nsearchives.nseindia.com/corporate/xbrl/-")
+    assert r.error.kind == ErrorKind.NOT_FOUND and "no XBRL file" in r.error.detail and not called

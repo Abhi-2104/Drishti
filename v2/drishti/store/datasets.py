@@ -5,11 +5,70 @@ indexed for fast history queries. Every write is an idempotent upsert, so re-run
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import Iterable
 
 INDEX_OPTION_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50")
 
 DDL = {
+    "price_eod": """
+CREATE TABLE IF NOT EXISTS price_eod (
+    trade_date TEXT NOT NULL, isin TEXT NOT NULL, exchange TEXT NOT NULL, series TEXT NOT NULL, symbol TEXT,
+    open REAL, high REAL, low REAL, close REAL NOT NULL, prev_close REAL, volume INTEGER, turnover REAL, trades INTEGER,
+    PRIMARY KEY (trade_date, isin, exchange, series));
+CREATE INDEX IF NOT EXISTS ix_price_isin ON price_eod (isin, trade_date)""",
+    "deal": """
+CREATE TABLE IF NOT EXISTS deal (
+    kind TEXT NOT NULL, trade_date TEXT NOT NULL, symbol TEXT NOT NULL, client TEXT NOT NULL, side TEXT NOT NULL, qty INTEGER NOT NULL,
+    price REAL, company TEXT, source TEXT NOT NULL, PRIMARY KEY (kind, trade_date, symbol, client, side, qty));
+CREATE INDEX IF NOT EXISTS ix_deal_symbol ON deal (symbol, trade_date)""",
+    "announcement": """
+CREATE TABLE IF NOT EXISTS announcement (
+    source TEXT NOT NULL, id TEXT NOT NULL, published TEXT NOT NULL, symbol TEXT, isin TEXT, scrip_code TEXT, company TEXT,
+    category TEXT, subcategory TEXT, headline TEXT, text TEXT, url TEXT, critical INTEGER, has_xbrl INTEGER,
+    PRIMARY KEY (source, id));
+CREATE INDEX IF NOT EXISTS ix_ann_isin ON announcement (isin, published);
+CREATE INDEX IF NOT EXISTS ix_ann_scrip ON announcement (scrip_code, published)""",
+    "corp_action": """
+CREATE TABLE IF NOT EXISTS corp_action (
+    symbol TEXT NOT NULL, ex_date TEXT NOT NULL, subject TEXT NOT NULL, isin TEXT, company TEXT, series TEXT, kind TEXT,
+    record_date TEXT, bc_start TEXT, bc_end TEXT, face_value REAL, PRIMARY KEY (symbol, ex_date, subject))""",
+    "credit_rating": """
+CREATE TABLE IF NOT EXISTS credit_rating (
+    app_id TEXT PRIMARY KEY, symbol TEXT, isin TEXT, company TEXT, agency TEXT, rating TEXT, outlook TEXT, action TEXT,
+    rating_date TEXT, broadcast TEXT, previous_rating TEXT, previous_outlook TEXT, previous_date TEXT, direction_by_scale TEXT,
+    listed INTEGER, xbrl_url TEXT);
+CREATE INDEX IF NOT EXISTS ix_cr_isin ON credit_rating (isin, rating_date)""",
+    "ipo": """
+CREATE TABLE IF NOT EXISTS ipo (
+    company TEXT NOT NULL, open TEXT NOT NULL, status TEXT, symbol TEXT, security_type TEXT, close TEXT, price_range TEXT,
+    issue_price TEXT, issue_size TEXT, listing_date TEXT, seen_at TEXT, PRIMARY KEY (company, open))""",
+    "market_holiday": """
+CREATE TABLE IF NOT EXISTS market_holiday (date TEXT NOT NULL, segment TEXT NOT NULL, description TEXT, PRIMARY KEY (date, segment))""",
+    "expiry": """
+CREATE TABLE IF NOT EXISTS expiry (symbol TEXT NOT NULL, expiry TEXT NOT NULL, seen_on TEXT, PRIMARY KEY (symbol, expiry))""",
+    "fundamentals": """
+CREATE TABLE IF NOT EXISTS fundamentals (
+    isin TEXT NOT NULL, latest_quarter TEXT NOT NULL, slug TEXT, basis TEXT, fetched_at TEXT NOT NULL, data TEXT NOT NULL,
+    PRIMARY KEY (isin, latest_quarter))""",
+    "board_meeting": """
+CREATE TABLE IF NOT EXISTS board_meeting (
+    exchange TEXT NOT NULL, code TEXT NOT NULL, meeting_date TEXT NOT NULL, purpose TEXT NOT NULL, symbol TEXT, isin TEXT,
+    company TEXT, kind TEXT, description TEXT, announced TEXT, url TEXT, PRIMARY KEY (exchange, code, meeting_date, purpose));
+CREATE INDEX IF NOT EXISTS ix_board_meeting_isin ON board_meeting (isin, meeting_date);
+CREATE INDEX IF NOT EXISTS ix_board_meeting_date ON board_meeting (meeting_date)""",
+    "fpi_nsdl": """
+CREATE TABLE IF NOT EXISTS fpi_nsdl (
+    report_date TEXT NOT NULL, category TEXT NOT NULL, route TEXT NOT NULL, gross_buy REAL NOT NULL, gross_sell REAL NOT NULL,
+    net REAL NOT NULL, net_usd_mn REAL, usd_inr REAL, PRIMARY KEY (report_date, category, route))""",
+    "fpi_nsdl_deriv": """
+CREATE TABLE IF NOT EXISTS fpi_nsdl_deriv (
+    report_date TEXT NOT NULL, product TEXT NOT NULL, buy_contracts INTEGER, buy_cr REAL, sell_contracts INTEGER, sell_cr REAL,
+    oi_contracts INTEGER, oi_cr REAL, PRIMARY KEY (report_date, product))""",
+    "gift_nifty": """
+CREATE TABLE IF NOT EXISTS gift_nifty (
+    ts TEXT PRIMARY KEY, last REAL NOT NULL, change REAL, pct REAL, expiry TEXT, nifty_close REAL, trade_date TEXT,
+    premium_pts REAL, premium_pct REAL)""",
     "index_close": """
 CREATE TABLE IF NOT EXISTS index_close (
     trade_date TEXT NOT NULL, index_name TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL NOT NULL,
@@ -105,9 +164,12 @@ def persist_macro(store, series: str, rows: Iterable[dict], source: str) -> int:
 
 
 def prune_incomplete(store, series: str, today: str) -> None:
-    """Remove bars of a market series dated today or on a weekend (an unfinished or weekend quote, never a session close)."""
+    """Remove bars of a market series dated today or on a weekend (an unfinished or weekend quote, never a session close).
+    Weekend special sessions (Muhurat trading) are kept."""
     ensure(store, "macro_series")
-    store._run("DELETE FROM macro_series WHERE series=? AND (obs_date >= ? OR strftime('%w', obs_date) IN ('0', '6'))", (series, today))
+    keep = sorted(special_sessions(store)) or ["-"]
+    store._run(f"DELETE FROM macro_series WHERE series=? AND (obs_date >= ? OR (strftime('%w', obs_date) IN ('0', '6') "
+               f"AND obs_date NOT IN ({','.join('?' * len(keep))})))", (series, today, *keep))
 
 
 def persist_cftc(store, rows: Iterable[dict]) -> int:
@@ -132,3 +194,203 @@ def persist_shp_filing(store, f: dict, master_row: dict) -> int:
     row = {"isin": isin, "as_on": f["as_on"], "record_id": master_row.get("record_id"), "broadcast": master_row.get("broadcast"),
            "revised": _b(master_row.get("revised")), "xbrl_url": master_row.get("xbrl_url"), **{c: _b(f.get(c)) for c in SHP_COLS}}
     return store.upsert("shp_filing", [row], ("isin", "as_on"))
+
+
+def persist_prices(store, rows, exchange: str) -> int:
+    """Daily bars per ISIN. BSE rows are kept only for ISINs NSE did not trade that day (NSE is primary for dual listings,
+    BSE covers the BSE-only names), so one stock has one primary price per day."""
+    ensure(store, "price_eod")
+    rows = [r for r in rows if r.get("isin") and r.get("close") is not None]
+    if exchange == "BSE" and rows:
+        have = {x["isin"] for x in store.query("SELECT isin FROM price_eod WHERE trade_date=? AND exchange='NSE'", (rows[0]["trade_date"],))}
+        rows = [r for r in rows if r["isin"] not in have]
+    keep = ("trade_date", "isin", "series", "symbol", "open", "high", "low", "close", "prev_close", "volume", "turnover", "trades")
+    out = [{**{k: r.get(k) for k in keep}, "exchange": exchange, "series": r.get("series") or "-"} for r in rows]
+    return store.upsert("price_eod", out, ("trade_date", "isin", "exchange", "series")) if out else 0
+
+
+def persist_deals(store, rows, source: str) -> int:
+    ensure(store, "deal")
+    out = [{"kind": r["kind"], "trade_date": r["date"], "symbol": r["symbol"], "client": r.get("client") or "-", "side": r.get("side") or "-",
+            "qty": r["qty"] or 0, "price": r.get("price"), "company": r.get("company"), "source": source} for r in rows if r.get("symbol")]
+    return store.upsert("deal", out, ("kind", "trade_date", "symbol", "client", "side", "qty")) if out else 0
+
+
+def persist_announcements(store, rows) -> int:
+    ensure(store, "announcement")
+    cols = ("source", "id", "published", "symbol", "isin", "scrip_code", "company", "category", "subcategory", "headline", "text", "url",
+            "critical", "has_xbrl")
+    return store.upsert("announcement", [{c: _b(r.get(c)) for c in cols} for r in rows], ("source", "id")) if rows else 0
+
+
+def persist_corp_actions(store, rows) -> int:
+    ensure(store, "corp_action")
+    cols = ("symbol", "ex_date", "subject", "isin", "company", "series", "kind", "record_date", "bc_start", "bc_end", "face_value")
+    rows = [r for r in rows if r.get("ex_date")]
+    n = store.upsert("corp_action", [{c: r.get(c) for c in cols} for r in rows], ("symbol", "ex_date", "subject")) if rows else 0
+    for r in rows:              # NSE's wording wins over a BSE copy of the same action stored earlier
+        if r.get("isin"):
+            store.delete_where("corp_action", "symbol LIKE 'BSE:%' AND isin=? AND ex_date=?", (r["isin"], r["ex_date"]))
+    return n
+
+
+def persist_credit_ratings(store, rows) -> int:
+    ensure(store, "credit_rating")
+    cols = ("app_id", "symbol", "isin", "company", "agency", "rating", "outlook", "action", "rating_date", "broadcast", "previous_rating",
+            "previous_outlook", "previous_date", "direction_by_scale", "listed", "xbrl_url")
+    return store.upsert("credit_rating", [{c: _b(r.get(c)) for c in cols} for r in rows], ("app_id",)) if rows else 0
+
+
+def persist_ipos(store, data: dict, seen_at: str) -> int:
+    ensure(store, "ipo")
+    rows = [r for part in ("current", "upcoming", "recent") for r in data.get(part, []) if r.get("company") and r.get("open")]
+    cols = ("company", "open", "status", "symbol", "security_type", "close", "price_range", "issue_price", "issue_size", "listing_date")
+    return store.upsert("ipo", [{**{c: r.get(c) for c in cols}, "seen_at": seen_at} for r in rows], ("company", "open")) if rows else 0
+
+
+def persist_holidays(store, rows) -> int:
+    ensure(store, "market_holiday")
+    return store.upsert("market_holiday", [{"date": r["date"], "segment": r["segment"], "description": r["description"]} for r in rows],
+                        ("date", "segment")) if rows else 0
+
+
+def persist_expiries(store, symbol: str, expiries, seen_on: str) -> int:
+    ensure(store, "expiry")
+    return store.upsert("expiry", [{"symbol": symbol, "expiry": e, "seen_on": seen_on} for e in expiries], ("symbol", "expiry"))
+
+
+def persist_gift(store, d: dict) -> int:
+    ensure(store, "gift_nifty")
+    g = d["gift_nifty"]
+    return store.upsert("gift_nifty", [{"ts": g["timestamp"] or d["trade_date"], "last": g["last"], "change": g["change"], "pct": g["pct"],
+                                        "expiry": g["expiry"], "nifty_close": d.get("nifty_close"), "trade_date": d["trade_date"],
+                                        "premium_pts": d.get("gift_premium_pts"), "premium_pct": d.get("gift_premium_pct")}], ("ts",))
+
+
+def special_sessions(store, segment: str = "CM") -> set[str]:
+    """Dates that trade although they look closed: NSE marks a holiday that has a special session (Diwali Muhurat
+    trading) with a trailing '*' in its holiday list (8 Nov 2026, a Sunday: 'Diwali Laxmi Pujan*'). A weekend date we
+    already hold NSE prices for counts too."""
+    out: set[str] = set()
+    if store.query("SELECT 1 AS x FROM sqlite_master WHERE name='market_holiday'"):
+        out |= {r["date"] for r in store.query("SELECT date FROM market_holiday WHERE segment=? AND description LIKE '%*'", (segment,))}
+    if store.query("SELECT 1 AS x FROM sqlite_master WHERE name='price_eod'"):
+        out |= {r["d"] for r in store.query("SELECT DISTINCT trade_date AS d FROM price_eod WHERE exchange='NSE' "
+                                             "AND strftime('%w', trade_date) IN ('0', '6')")}
+    return out
+
+
+def is_holiday(store, day: str, segment: str = "CM") -> bool | None:
+    """True/False from NSE's own holiday list; None if the list for that year is not stored. A special-session day
+    (see special_sessions) is not a holiday: an end-of-day file is published for it."""
+    if not store.query("SELECT 1 AS x FROM sqlite_master WHERE name='market_holiday'"):
+        return None
+    if not store.query("SELECT 1 AS x FROM market_holiday WHERE segment=? AND substr(date,1,4)=?", (segment, day[:4])):
+        return None
+    if day in special_sessions(store, segment):
+        return False
+    return bool(store.query("SELECT 1 AS x FROM market_holiday WHERE segment=? AND date=?", (segment, day)))
+
+
+def is_session(store, day: str) -> bool:
+    """Should NSE publish end-of-day files for `day`? Weekdays that are not holidays, plus special sessions."""
+    if day in special_sessions(store):
+        return True
+    return date.fromisoformat(day).weekday() < 5 and not is_holiday(store, day)
+
+
+def persist_fundamentals(store, isin: str, slug: str, data: dict, fetched_at: str) -> int:
+    """One row per (ISIN, newest quarter reported): earlier quarters' snapshots are kept, so what was known when stays
+    answerable (point-in-time). A re-fetch within the same quarter replaces that quarter's snapshot."""
+    import json
+    ensure(store, "fundamentals")
+    return store.upsert("fundamentals", [{"isin": isin, "latest_quarter": data.get("latest_quarter") or fetched_at[:10], "slug": slug,
+                                          "basis": data.get("basis"), "fetched_at": fetched_at, "data": json.dumps(data, default=str)}],
+                        ("isin", "latest_quarter"))
+
+
+def latest_fundamentals(store, isin: str, on: str | None = None) -> dict | None:
+    import json
+    if not store.query("SELECT 1 AS x FROM sqlite_master WHERE name='fundamentals'"):
+        return None
+    rows = store.query("SELECT * FROM fundamentals WHERE isin=? AND substr(fetched_at,1,10) <= ? ORDER BY latest_quarter DESC LIMIT 1",
+                       (isin, on or "9999-12-31"))
+    if not rows:
+        return None
+    r = rows[0]
+    return {**{k: r[k] for k in ("isin", "latest_quarter", "slug", "basis", "fetched_at")}, "data": json.loads(r["data"])}
+
+
+def _isin_for_scrip(store, code: str) -> str | None:
+    m = store.find_securities(bse_scrip=code)
+    return m[0]["isin"] if len(m) == 1 else None
+
+
+def persist_board_meetings(store, rows) -> int:
+    """NSE board meetings and the BSE results calendar in one table. BSE rows get their ISIN from the security master,
+    so one company's meeting can be found from either exchange's listing."""
+    ensure(store, "board_meeting")
+    cols = ("exchange", "code", "meeting_date", "purpose", "symbol", "isin", "company", "kind", "description", "announced", "url")
+    out = []
+    for r in rows:
+        r = dict(r)
+        if r["exchange"] == "BSE" and not r.get("isin"):
+            r["isin"] = _isin_for_scrip(store, r["code"])
+        out.append({c: r.get(c) for c in cols})
+    return store.upsert("board_meeting", out, ("exchange", "code", "meeting_date", "purpose")) if out else 0
+
+
+def upcoming_meetings(store, *, isin: str | None = None, start: str, end: str) -> list[dict]:
+    """Meetings in [start, end], one row per company and date: the purposes and kinds from every row and both exchanges
+    are merged, and NSE's details (intimation time, attachment) are kept when NSE lists it."""
+    ensure(store, "board_meeting")
+    where, args = "meeting_date BETWEEN ? AND ?", [start, end]
+    if isin:
+        where += " AND isin = ?"
+        args.append(isin)
+    rows = store.query(f"SELECT * FROM board_meeting WHERE {where}", tuple(args))
+    merged: dict = {}
+    for r in sorted(rows, key=lambda r: (r["meeting_date"], r["exchange"] != "NSE", r["announced"] or "")):
+        key = (r["isin"] or f"{r['exchange']}:{r['code']}", r["meeting_date"])
+        m = merged.get(key)
+        if m is None:
+            merged[key] = {**r, "purposes": [r["purpose"]], "kinds": [r["kind"]], "exchanges": [r["exchange"]]}
+            continue
+        for k, v in (("purposes", r["purpose"]), ("kinds", r["kind"]), ("exchanges", r["exchange"])):
+            if v not in m[k]:
+                m[k].append(v)
+        if r["exchange"] == "NSE" and r["description"] and r["kind"] == "results":
+            m["description"] = r["description"]
+    out = sorted(merged.values(), key=lambda m: (m["meeting_date"], m["symbol"] or ""))
+    for m in out:
+        m["kind"] = "results" if "results" in m["kinds"] else m["kinds"][0]
+        del m["purpose"]
+    return out
+
+
+def persist_bse_corp_actions(store, rows) -> int:
+    """BSE corporate actions go into corp_action only for companies NSE did not list an action for on that ex-date
+    (dual-listed companies would otherwise appear twice under differently worded subjects)."""
+    ensure(store, "corp_action")
+    out = []
+    for r in rows:
+        if not r.get("ex_date"):
+            continue
+        isin = _isin_for_scrip(store, r["scrip_code"])
+        if isin and store.query("SELECT 1 FROM corp_action WHERE isin=? AND ex_date=? AND symbol NOT LIKE 'BSE:%' LIMIT 1", (isin, r["ex_date"])):
+            continue
+        out.append({"symbol": f"BSE:{r['scrip_code']}", "ex_date": r["ex_date"], "subject": r["subject"], "isin": isin,
+                    "company": r.get("company"), "series": "BSE", "kind": r["kind"], "record_date": r.get("record_date"),
+                    "bc_start": r.get("bc_start"), "bc_end": r.get("bc_end"), "face_value": None})
+    return store.upsert("corp_action", out, ("symbol", "ex_date", "subject")) if out else 0
+
+
+def persist_fpi(store, data: dict) -> int:
+    ensure(store, "fpi_nsdl", "fpi_nsdl_deriv")
+    rows = [{"report_date": data["date"], **{k: r[k] for k in ("category", "route", "gross_buy", "gross_sell", "net", "net_usd_mn")},
+             "usd_inr": data.get("usd_inr")} for r in data["rows"]]
+    rows.append({"report_date": data["date"], "category": "Total", "route": "Total", **data["total"], "usd_inr": data.get("usd_inr")})
+    n = store.upsert("fpi_nsdl", rows, ("report_date", "category", "route"))
+    d_day = data.get("derivatives_date") or data["date"]
+    der = [{"report_date": d_day, **r} for r in data.get("derivatives") or []]
+    return n + (store.upsert("fpi_nsdl_deriv", der, ("report_date", "product")) if der else 0)

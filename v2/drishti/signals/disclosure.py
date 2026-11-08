@@ -54,7 +54,7 @@ def insider_cluster(store, isin: str, on=None, *, symbol: str | None = None):
     flags = []
     if sc:
         flags.append("insider selling cluster (scoring.md: strong negative)")
-    if bc or bv >= p["size_buy_inr"]:
+    if bc or bv >= p["size_buy_crore"] * 1e7:
         flags.append("insider size buying (scoring.md: strong positive)")
     label = "conflicting insider activity" if len(flags) == 2 else flags[0] if flags else ("minor insider activity" if trades else "no open-market insider trades")
     comps = [Component("open-market buys", len(buys), d.isoformat(), f"last {p['window_days']} days", None, f"Rs {bv:,.0f} by {len({r['person'] for r in buys})} insiders"),

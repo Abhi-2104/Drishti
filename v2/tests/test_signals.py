@@ -62,7 +62,7 @@ def test_participant_oi_labels_follow_v1(st):
     assert s["score"] == (5 + -6) - (-4) == 3 and s["label"] == "no strong divergence"
     fii = {x["segment"]: x["label"] for x in s["details"]["stance"]["FII"]}
     assert fii == {"Index Futures": "Strong Bullish", "Call Options": "Mild Bullish", "Put Options": "Strong Bullish"}
-    assert s["as_of"] == "2026-11-06" and s["missing"] == []
+    assert s["as_of"] == "2026-11-06" and s["missing"] == ["percentile labelling needs 20+ stored sessions; showing the v1 fixed-threshold label"]
 
 
 def test_participant_oi_strong_threshold_and_first_day(st):
@@ -377,3 +377,67 @@ def test_yahoo_drops_live_and_weekend_bars():
     rows = [{"date": "2026-11-06", "close": 1.0}, {"date": "2026-11-07", "close": 1.0}, {"date": "2026-11-08", "close": 1.0}]
     assert [r["date"] for r in yahoo.complete_bars(rows, date(2026, 11, 8))] == ["2026-11-06"]
     assert [r["date"] for r in yahoo.complete_bars(rows[:1], date(2026, 11, 6))] == []      # today's bar may still be live
+
+
+def test_install_settings_override_and_are_strict(st, tmp_path):
+    from drishti.signals import base
+    f = tmp_path / "signal-settings.toml"
+    f.write_text("[pledge]\nstrong_caution_pledged_pct = 40.0\n", encoding="utf-8")
+    try:
+        base.use_settings(f)
+        p, v = base.params("pledge")
+        assert p["strong_caution_pledged_pct"] == 40.0 and p["rising_min_pp"] == 1.0 and "+local:" in v
+        shp(st, "INE002A01018", "2026-06-30", 24.0)
+        shp(st, "INE002A01018", "2026-09-30", 31.5)
+        s = disclosure.pledge(st, "INE002A01018", date(2026, 11, 8)).data
+        assert "strong caution" not in s["label"] and "rising pledge" in s["label"]      # 31.5% < the user's 40%
+        f.write_text("[pledge]\nstrong_caution_pct = 40.0\n", encoding="utf-8")         # misspelt: refused, not ignored
+        with pytest.raises(base.SettingsError):
+            base.params("pledge")
+        f.write_text("[pledge]\nrising_min_pp = \"one\"\n", encoding="utf-8")
+        with pytest.raises(base.SettingsError):
+            base.params("pledge")
+    finally:
+        base.use_settings(None)
+
+
+def test_settings_edit_is_seen_even_when_the_file_time_does_not_change(tmp_path):
+    """Windows can give two saves within a second the same mtime; an edit must still take effect."""
+    import os
+    from drishti.signals import base
+    f = tmp_path / "signal-settings.toml"
+    f.write_text("[pledge]\nstrong_caution_pledged_pct = 40.0\n", encoding="utf-8")
+    t = f.stat().st_mtime_ns
+    try:
+        base.use_settings(f)
+        assert base.params("pledge")[0]["strong_caution_pledged_pct"] == 40.0
+        f.write_text("[pledge]\nstrong_caution_pledged_pct = 30.0\n", encoding="utf-8")
+        os.utime(f, ns=(t, t))
+        assert base.params("pledge")[0]["strong_caution_pledged_pct"] == 30.0
+    finally:
+        base.use_settings(None)
+
+
+def test_template_lists_only_real_settings():
+    import tomllib
+    from drishti.config import SIGNAL_SETTINGS_TEMPLATE
+    from drishti.signals.base import PARAMS_PATH
+    shipped = tomllib.loads(PARAMS_PATH.read_text(encoding="utf-8"))
+    uncommented = "\n".join(line.lstrip("# ") if line.startswith("# ") and "=" in line.split("#")[1] else line
+                            for line in SIGNAL_SETTINGS_TEMPLATE.read_text(encoding="utf-8").splitlines())
+    t = tomllib.loads("\n".join(l.split("  #")[0] for l in uncommented.splitlines()))
+    for sec, vals in t.items():
+        assert sec in shipped and set(vals) <= set(shipped[sec]), sec
+        for k, v in vals.items():
+            assert v == shipped[sec][k], (sec, k)          # the template documents the real defaults
+
+
+def test_percentile_labels_when_history_exists(st):
+    rows = []
+    for i, d in enumerate(weekdays(date(2026, 11, 6), 30)):
+        k = 100 + i * 10
+        rows += [oi_row(d, "FII", k, 0, 0, 0, 0, 0), oi_row(d, "Pro", 0, 0, 0, 0, 0, 0), oi_row(d, "Client", 0, k, 0, 0, 0, 0),
+                 oi_row(d, "DII", 0, 0, 0, 0, 0, 0)]
+    ds.persist_participant_oi(st, rows)
+    s = market.participant_oi(st, date(2026, 11, 6)).data
+    assert s["label"].startswith("strong bullish vs its own history") and "(v1 rule:" in s["label"]

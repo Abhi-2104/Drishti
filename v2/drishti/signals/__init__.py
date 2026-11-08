@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from . import calendar, cycle, disclosure, flows, market
+from . import calendar, cycle, disclosure, flows, market, price
 
 MARKET = {
     "seasonality": calendar.seasonality,
@@ -20,7 +20,7 @@ MARKET = {
     "credit_spreads": flows.credit_spreads,
     "cycle_phase": cycle.cycle_phase,
 }
-SINGLE_NAME = {"insider_cluster": disclosure.insider_cluster, "pledge": disclosure.pledge}
+SINGLE_NAME = {"insider_cluster": disclosure.insider_cluster, "pledge": disclosure.pledge, "price_context": price.price_context}
 
 
 def compute(store, name: str, on=None, **kw):

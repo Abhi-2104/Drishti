@@ -1,14 +1,24 @@
 # Using Drishti from Claude (MCP)
 
-`drishti mcp` is a stdio MCP server over the local database. It reads what the jobs have stored; it never fetches.
+`drishti mcp` is a stdio MCP server over the local database. Market-wide and history tools read only what the jobs
+stored. A few single-company tools also fetch live (quote, option chain, announcements, and fundamentals when the stored
+copy is older than 7 days); each says so in its `sources`.
 
-| Tool | What it answers |
+| Group | Tools |
 |---|---|
-| `data_health` | What is fresh, what failed, canaries. Ask this first when freshness matters. |
-| `resolve_security` | ISIN / NSE symbol / BSE symbol / BSE scrip code -> the security. Several matches are returned as `ambiguous`. |
-| `insider_trades` | SEBI insider disclosures, last N days, optional company and direction, with buy/sell totals. |
+| Health and lookup | `data_health` (start here), `resolve_security` (ambiguous matches are returned as such, never guessed) |
+| Macro and market regime | `get_macro_regime`, `get_cycle_phase`, `get_seasonality`, `get_liquidity`, `get_credit_spreads`, `get_midcap_ratio`, `get_sector_rotation` |
+| Flows and derivatives | `get_fii_dii` (NSE provisional), `get_fpi_flows` (NSDL confirmed, a day later), `get_participant_oi`, `get_options_flow`, `get_option_chain` |
+| Disclosures | `insider_trades`, `get_insider_cluster`, `get_pledge`, `screen_disclosures` |
+| One company | `get_fundamentals`, `get_quote`, `get_price_context`, `get_announcements`, `get_corporate_actions`, `get_credit_ratings`, `get_deals` |
+| Calendar | `get_calendar` (board meetings / results dates, NSE + BSE), `get_market_today` (Gift Nifty, IPOs, expiries, holidays) |
+
+Signals accept `as_of` (YYYY-MM-DD) and then read only data up to that date.
 
 Every reply is `{data, as_of, sources, error}`. A stale answer carries `error.kind = STALE` together with the data.
+
+Known gaps: BSE bulk/block deals (BSE's page is script-rendered; NSE's deals cover most names), NSE's financial-results
+filing list (its date filter did not work when probed), event-calendar (a subset of board meetings, not used).
 
 ## Register in Claude Desktop (Windows)
 

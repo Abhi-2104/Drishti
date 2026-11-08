@@ -7,7 +7,7 @@
 #   provisional    not yet decided by you or your brother; a placeholder with the stated rationale. Outputs using these
 #                  carry provisional=true so nobody mistakes them for calibrated thresholds.
 
-version = "2026-11-08.2"
+version = "2026-11-08.3"
 
 [macro_regime]                      # source: v1:macroRegime.ts ("calibration-sensitive heuristics, medium confidence")
 dxy_bearish_above = 104.0
@@ -24,7 +24,9 @@ us_vix_premium_points = 2.0         # US VIX above India VIX by more than this =
 max_input_age_days = 5              # an input older than this vs the as-of date counts as missing (UNKNOWN, never neutral)
 
 [participant_oi]                    # source: v1:participantOi.ts (Sensibull logic)
-strong_threshold = 4                # |(FII+Pro) - Client| >= this = strong divergence
+label_by = "percentile"             # recommended 8 Nov: "percentile" = strong means extreme vs its own past year; "fixed" = v1 rule
+strong_percentile = 20.0            # percentile mode: bottom 20% of the past year = strong bearish, top 20% = strong bullish
+strong_threshold = 4                # fixed mode (v1): |(FII+Pro) - Client| >= this = strong divergence
 segments = ["Index Futures", "Call Options", "Put Options"]
 history_sessions = 250              # added 8 Nov: percentile of today's score vs its own past. Context only; the v1 score and
                                     # threshold are unchanged (replay: "strong bearish" on 85% of 240 sessions at +/-4)
@@ -55,8 +57,10 @@ missing_inputs = ["India/US/China PMI", "India CPI/WPI/IIP"]   # named in the bl
 [options_flow]                      # computed from the EOD F&O bhavcopy (L2-4); thresholds pending v0 guide
 symbols = ["NIFTY", "BANKNIFTY"]
 walls = 3                           # top-N call / put strikes by OI
+label_by = "fixed"                  # "fixed" = the PCR levels below; "percentile" = extreme vs its own past
 pcr_bullish_above = 1.3             # provisional: common market convention, NOT from your brother's v0 guide yet
 pcr_bearish_below = 0.7             # provisional
+extreme_percentile = 15.0           # percentile mode: top/bottom 15% of the past = put-heavy / call-heavy
 provisional = true
 
 [fii_dii]                           # L2-1; scoring.md: institutional flow is confirmation, not thesis
@@ -78,7 +82,7 @@ provisional = true
 window_days = 90
 cluster_days = 30
 cluster_min_persons = 3             # provisional: distinct insiders on the same side inside cluster_days
-size_buy_inr = 10000000.0           # provisional: Rs 1 crore of open-market buying by insiders = "size"
+size_buy_crore = 1.0                # provisional: Rs 1 crore of open-market buying by insiders = "size"
 insider_categories = ["Promoter", "Promoter Group", "Promoter and Director", "Director", "KMP", "Designated Person", "Immediate Relative"]
 market_modes = ["Market Purchase", "Market Sale"]   # only open-market trades count; gifts, ESOPs, inter-se transfers do not
 provisional = true

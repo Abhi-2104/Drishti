@@ -197,7 +197,24 @@ def group_master() -> None:
     print(f"equity_l: {len(keep) - 1} of {len(lines) - 1} rows")
 
 
-GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse, "pit": group_pit, "shp": group_shp, "macro": group_macro, "master": group_master}
+def group_corp() -> None:
+    """NSE corporate/calendar API samples (trimmed where large) and one BSE announcements page."""
+    src, dst = RAW / "nse_live", ROOT / "nse_corp"
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in ("corporate_announcements.json", "corporate_actions.json", "short_selling.json", "holiday_master.json",
+                 "marketStatus.json", "option_contract_info.json", "ipo_current.json", "ipo_upcoming.json"):
+        shutil.copyfile(src / name, dst / name)
+    cr = json.loads((src / "credit_ratings.json").read_text(encoding="utf-8"))
+    keep = [r for r in cr if r["RatingAction"] != "Reaffirm"][:12] + [r for r in cr if r["RatingAction"] == "Reaffirm"][:12]
+    (dst / "credit_ratings.json").write_text(json.dumps(keep, indent=1), encoding="utf-8", newline="\n")
+    past = json.loads((src / "ipo_past.json").read_text(encoding="utf-8"))
+    (dst / "ipo_past.json").write_text(json.dumps(past[:40], indent=1), encoding="utf-8", newline="\n")
+    (ROOT / "bse").mkdir(exist_ok=True)
+    shutil.copyfile(RAW / "bse" / "announcements_500325.json", ROOT / "bse" / "announcements_500325.json")
+    print(f"corp: 8 files copied, credit ratings {len(keep)} of {len(cr)}, ipo past 40 of {len(past)}")
+
+
+GROUPS = {"nse_archive": group_nse_archive, "bse": group_bse, "pit": group_pit, "shp": group_shp, "macro": group_macro, "master": group_master, "corp": group_corp}
 
 
 def main() -> int:

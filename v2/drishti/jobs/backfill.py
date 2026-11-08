@@ -13,7 +13,7 @@ from typing import Callable
 
 from ..core.canary import today_ist
 from ..core.envelope import DrishtiError, ErrorKind, Result
-from ..providers import fred, nse_archive, nse_pit, nse_shp, yahoo
+from ..providers import bse, fred, nse_archive, nse_corp, nse_pit, nse_shp, yahoo
 from ..store import Store
 from ..store import datasets as ds
 
@@ -37,11 +37,12 @@ class BackfillReport:
         return not self.stopped.startswith("aborted") and len(self.failed) <= max(2, self.done // 20)
 
 
-def _weekdays_back(start: date, days: int):
+def _weekdays_back(start: date, days: int, sessions: set[str] = frozenset()):
+    """Weekdays from `start` going back `days`, plus weekend special sessions (Muhurat trading) in `sessions`."""
     d = start
     end = start - timedelta(days=days)
     while d > end:
-        if d.weekday() < 5:
+        if d.weekday() < 5 or d.isoformat() in sessions:
             yield d
         d -= timedelta(days=1)
 
@@ -60,7 +61,7 @@ def _daily(store: Store, target: str, table: str, fetch: Callable[[date], Result
     rep = BackfillReport(target)
     have = _have_dates(store, table)
     t0, streak = clock(), 0
-    for d in _weekdays_back(start, days):
+    for d in _weekdays_back(start, days, ds.special_sessions(store)):
         if clock() - t0 > budget_s:
             rep.stopped = f"time budget reached at {d}; run again to continue"
             break
@@ -102,6 +103,26 @@ def backfill_fo_index(store, *, days=180, budget_s=3600, start=None, progress=_n
     not kept for backfilled days, which keeps the database small; the latest days still are, via the daily job."""
     return _daily(store, "fo_index", "index_option_eod", lambda d: nse_archive.fo_bhavcopy(d, store=None),
                   lambda s, r: ds.persist_fo_index(s, r.data), days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
+
+
+def backfill_prices(store, *, days=380, budget_s=3600, start=None, progress=_noop):
+    """One year of daily bars: NSE cash bhavcopy (all traded stocks) plus BSE for names NSE did not trade. Raw files are not
+    kept for backfilled days. A BSE failure on a day is reported but does not throw away that day's NSE prices."""
+    def fetch(d):
+        n = nse_archive.cm_bhavcopy(d, store=None)
+        if not n.ok:
+            return n
+        b = bse.bhavcopy(d, store=None)
+        return Result(data={"nse": n.data, "bse": b.data if b.ok else [], "bse_error": None if b.ok else f"{b.error.kind}: {b.error.detail[:80]}"},
+                      as_of=n.as_of)
+
+    def persist(s, r):
+        k = ds.persist_prices(s, r.data["nse"], "NSE") + ds.persist_prices(s, r.data["bse"], "BSE")
+        if r.data["bse_error"]:
+            progress(f"   ...prices {r.as_of}: BSE file failed ({r.data['bse_error']}); NSE prices kept")
+        return k
+    ds.ensure(store, "price_eod")
+    return _daily(store, "prices", "price_eod", fetch, persist, days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
 
 
 def backfill_macro(store, *, rng="5y", today=None, progress=_noop):
@@ -216,8 +237,68 @@ def backfill_shp(store, *, budget_s=3600, today=None, clock=time.monotonic, prog
     return rep
 
 
+WINDOW_DDL = """
+CREATE TABLE IF NOT EXISTS backfill_window (
+    target TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, rows INTEGER, capped TEXT, done_at TEXT,
+    PRIMARY KEY (target, start, end))"""
+
+
+# Verified 8 Nov 2026: NSE's historical JSON caps every answer at 70 rows, even for one day; its CSV download does not
+# (96 bulk deals on 6 Nov, as in the snapshot). nse_corp.historical_deals uses the CSV wherever the cap bites.
+COMPLETE_HISTORY_KINDS = ("block", "bulk", "short")
+
+
+def backfill_deals(store, *, days=365, window=30, kinds=COMPLETE_HISTORY_KINDS, budget_s=3600, today=None, clock=time.monotonic,
+                   progress=_noop):
+    """Deals for the past `days` from NSE's historical endpoint in `window`-day pieces (split further when NSE's 70-row
+    cap is hit). Block deals only by default: see COMPLETE_HISTORY_KINDS. Finished windows are remembered, so this
+    resumes. A day that still fills the cap on its own is kept but reported as failed: its list is known to be short."""
+    from datetime import datetime
+    ds.ensure(store, "deal")
+    store.ensure_table(WINDOW_DDL)
+    rep = BackfillReport("deals")
+    today = today or today_ist()
+    t0 = clock()
+    have = {(r["target"], r["start"], r["end"]) for r in store.query("SELECT target, start, end FROM backfill_window WHERE capped IS NULL")}
+    fails = 0
+    for kind in kinds:
+        for k in range(0, days, window):
+            end = today - timedelta(days=k + 1)
+            start = end - timedelta(days=window - 1)
+            tag = f"deals_{kind}"
+            if (tag, start.isoformat(), end.isoformat()) in have:
+                rep.skipped += 1
+                continue
+            if clock() - t0 > budget_s:
+                rep.stopped = f"time budget reached at {kind} {end}; run again to continue"
+                return rep
+            r = nse_corp.historical_deals(kind, start, end, extra_days=ds.special_sessions(store))
+            if r.data:
+                n = ds.persist_deals(store, r.data["deals"], "nse_hist")
+                rep.rows += n
+                store.upsert("backfill_window", [{"target": tag, "start": start.isoformat(), "end": end.isoformat(), "rows": n,
+                                                  "capped": ",".join(r.data["capped_days"]) or None,
+                                                  "done_at": datetime.now().isoformat(timespec="seconds")}], ("target", "start", "end"))
+                rep.done += 1
+                rep.oldest = min(rep.oldest or start.isoformat(), start.isoformat())
+                rep.newest = max(rep.newest or end.isoformat(), end.isoformat())
+                for d in r.data["capped_days"]:
+                    rep.failed.append({"date": d, "kind": "PARSE_FAIL", "detail": f"{kind}: NSE capped the day at {nse_corp.HIST_CAP} rows"})
+                fails = 0
+                progress(f"   ...deals {kind}: {start}..{end} -> {n} deals in {r.data['requests']} requests"
+                         f"{', capped days ' + str(r.data['capped_days']) if r.data['capped_days'] else ''} ({clock() - t0:.0f}s)")
+            else:
+                fails += 1
+                rep.failed.append({"date": end.isoformat(), "kind": str(r.error.kind), "detail": f"{kind}: {r.error.detail[:150]}"})
+                progress(f"   ...deals {kind}: {start}..{end} failed {r.error.kind}")
+                if fails >= MAX_CONSECUTIVE_FAILURES:
+                    rep.stopped = f"aborted after {fails} failures in a row ({r.error.kind}); what was fetched is kept"
+                    return rep
+    return rep
+
+
 TARGETS = {
     "index_closes": backfill_index_closes, "participant_oi": backfill_participant_oi, "fo_index": backfill_fo_index,
-    "macro": backfill_macro, "insider": backfill_insider, "shp": backfill_shp,
+    "prices": backfill_prices, "macro": backfill_macro, "insider": backfill_insider, "shp": backfill_shp, "deals": backfill_deals,
 }
-DEFAULT_DAYS = {"index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180}
+DEFAULT_DAYS = {"prices": 380, "index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180, "deals": 365}

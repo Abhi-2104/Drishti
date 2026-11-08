@@ -148,13 +148,15 @@ def load_parsed(store, dataset: str, d: date | str, fetcher: Callable[[], Fetche
     return parsed, got
 
 
-def latest(fn: Callable[[date], Result], start: date | None = None, max_back: int = 7) -> Result:
+def latest(fn: Callable[[date], Result], start: date | None = None, max_back: int = 7, sessions: set[str] | None = None) -> Result:
     """Newest available daily file: try `start` (default today IST), then earlier weekdays while the file is
-    NOT_FOUND (not yet published, or a market holiday). Any other error is returned as is, not skipped."""
+    NOT_FOUND (not yet published, or a market holiday). Weekend dates in `sessions` (special sessions such as Muhurat
+    trading) are tried too. Any other error is returned as is, not skipped."""
     d = start or today_ist()
     tried = 0
+    sessions = sessions or set()
     while tried < max_back:
-        if d.weekday() < 5:
+        if d.weekday() < 5 or d.isoformat() in sessions:
             tried += 1
             r = fn(d)
             if not (r.error and r.error.kind == ErrorKind.NOT_FOUND):

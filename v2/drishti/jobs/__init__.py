@@ -17,7 +17,7 @@ from ..core.canary import IST
 from ..core.envelope import DrishtiError, ErrorKind, Result
 from ..providers import _util as u
 from .. import signals
-from ..providers import cftc, fred, nse_archive, nse_flows, nse_pit, nse_shp, security_master, yahoo
+from ..providers import cftc, fred, nsdl, nse_archive, nse_corp, nse_flows, nse_pit, nse_shp, security_master, yahoo
 from ..signals import disclosure
 from ..store import datasets as ds
 from ..providers import bse as bse_provider
@@ -82,7 +82,7 @@ class JobReport:
 
 # --- steps --------------------------------------------------------------------------------------------
 def _latest(fn) -> Callable[[Store, date], Result]:
-    return lambda store, today: u.latest(lambda d: fn(d, store=store), today)
+    return lambda store, today: u.latest(lambda d: fn(d, store=store), today, sessions=ds.special_sessions(store))
 
 
 def _insider_run(store: Store, today: date) -> Result:
@@ -130,18 +130,51 @@ def _screen_step() -> Step:
     return Step("signal_disclosure_screen", run, persist=persist, count=lambda r: len(r.data["insider"]) + len(r.data["pledge"]))
 
 
+def _archive_deals(kind: str):
+    def persist(store, res):
+        return ds.persist_deals(store, [{"kind": kind, "date": r["trade_date"], "symbol": r["symbol"], "client": r["client"], "side": r["side"],
+                                         "qty": r["quantity"], "price": r["price"], "company": r["name"]} for r in res.data], "nse_archive")
+    return persist
+
+
+def _large_deals_persist(store, res):
+    d = res.data
+    return ds.persist_deals(store, d["bulk"] + d["block"] + d["short"], "nse_api")
+
+
+def _expiry_step(sym: str) -> Step:
+    return Step(f"expiries_{sym}", lambda s, t: nse_corp.expiries(sym, today=t),
+                persist=lambda st, r: ds.persist_expiries(st, sym, r.data["expiries"], r.as_of), count=lambda r: len(r.data["expiries"]))
+
+
 DAILY_FRED = ("DTWEXBGS", "DGS10", "DCOILBRENTEU", "DEXINUS", "VIXCLS", "BAMLH0A0HYM2", "T10Y2Y")
 WEEKLY_FRED = ("WALCL", "M2SL")
 
 STEPS = {
-    "cm_bhavcopy": Step("cm_bhavcopy", _latest(nse_archive.cm_bhavcopy), daily=True),
+    "cm_bhavcopy": Step("cm_bhavcopy", _latest(nse_archive.cm_bhavcopy), persist=lambda st, r: ds.persist_prices(st, r.data, "NSE"), daily=True),
     "fo_bhavcopy": Step("fo_bhavcopy", _latest(nse_archive.fo_bhavcopy), persist=_p(ds.persist_fo_index), daily=True),
-    "bse_bhavcopy": Step("bse_bhavcopy", _latest(bse_provider.bhavcopy), daily=True),
+    "bse_bhavcopy": Step("bse_bhavcopy", _latest(bse_provider.bhavcopy), persist=lambda st, r: ds.persist_prices(st, r.data, "BSE"), daily=True),
     "participant_oi": Step("participant_oi", _latest(nse_archive.participant_oi), persist=_p(ds.persist_participant_oi), daily=True),
     "index_closes": Step("index_closes", _latest(nse_archive.index_closes), persist=_p(ds.persist_index_closes), daily=True),
     "fo_ban_list": Step("fo_ban_list", _latest(nse_archive.fo_ban_list), daily=True),
-    "bulk_deals": Step("bulk_deals", lambda s, t: nse_archive.bulk_deals(store=s)),
-    "block_deals": Step("block_deals", lambda s, t: nse_archive.block_deals(store=s)),
+    "bulk_deals": Step("bulk_deals", lambda s, t: nse_archive.bulk_deals(store=s), persist=_archive_deals("bulk")),
+    "block_deals": Step("block_deals", lambda s, t: nse_archive.block_deals(store=s), persist=_archive_deals("block")),
+    "large_deals": Step("large_deals", lambda s, t: nse_corp.large_deals(today=t), persist=_large_deals_persist,
+                        count=lambda r: sum(len(r.data[k]) for k in ("bulk", "block", "short"))),
+    "announcements": Step("announcements", lambda s, t: nse_corp.announcements(days=2, today=t), persist=_p(ds.persist_announcements)),
+    "corp_actions": Step("corp_actions", lambda s, t: nse_corp.corporate_actions(today=t), persist=_p(ds.persist_corp_actions)),
+    "board_meetings": Step("board_meetings", lambda s, t: nse_corp.board_meetings(today=t), persist=_p(ds.persist_board_meetings)),
+    "bse_corp_actions": Step("bse_corp_actions", lambda s, t: bse_provider.corporate_actions(today=t), persist=_p(ds.persist_bse_corp_actions)),
+    "bse_result_calendar": Step("bse_result_calendar", lambda s, t: bse_provider.result_calendar(today=t),
+                                persist=_p(ds.persist_board_meetings)),
+    "nsdl_fpi": Step("nsdl_fpi", lambda s, t: nsdl.fpi_daily(today=t), persist=_p(ds.persist_fpi), count=lambda r: len(r.data["rows"])),
+    "credit_ratings": Step("credit_ratings", lambda s, t: nse_corp.credit_ratings(today=t), persist=_p(ds.persist_credit_ratings)),
+    "ipos": Step("ipos", lambda s, t: nse_corp.ipos(today=t), persist=lambda st, r: ds.persist_ipos(st, r.data, r.as_of),
+                 count=lambda r: len(r.data["current"]) + len(r.data["upcoming"]) + len(r.data["recent"])),
+    "holidays": Step("holidays", lambda s, t: nse_corp.holidays(today=t), persist=_p(ds.persist_holidays)),
+    "expiries_NIFTY": _expiry_step("NIFTY"),
+    "expiries_BANKNIFTY": _expiry_step("BANKNIFTY"),
+    "market_status": Step("market_status", lambda s, t: nse_corp.market_status(today=t), persist=_p(ds.persist_gift), count=lambda r: 1),
     "fii_dii_cash": Step("fii_dii_cash", lambda s, t: nse_flows.fii_dii_cash(store=s, today=t), persist=_p(ds.persist_fii_dii),
                          count=lambda r: 2),
     **{f"fred_{x}": _fred(x) for x in DAILY_FRED + WEEKLY_FRED},
@@ -160,6 +193,14 @@ JOBS: dict[str, Job] = {j.name: j for j in (
         tuple(STEPS[k] for k in ("cm_bhavcopy", "fo_bhavcopy", "bse_bhavcopy"))),
     Job("eod_flows", "19:15", "Participant OI, F&O ban list, index closes, bulk and block deals, cash FII/DII",
         tuple(STEPS[k] for k in ("participant_oi", "fo_ban_list", "index_closes", "bulk_deals", "block_deals", "fii_dii_cash"))),
+    Job("eod_corporate", "19:45", "Announcements, corporate actions (NSE, then BSE-only), board meetings and the BSE results "
+        "calendar, credit ratings, large deals incl. short selling, IPO lists",
+        tuple(STEPS[k] for k in ("announcements", "corp_actions", "bse_corp_actions", "board_meetings", "bse_result_calendar",
+                                 "credit_ratings", "large_deals", "ipos"))),
+    Job("premarket", "08:45", "Market status and Gift Nifty vs the last Nifty close; NSDL confirmed FPI flows for the last day",
+        (STEPS["market_status"], STEPS["nsdl_fpi"])),
+    Job("calendars", "Mon 07:00", "NSE trading holidays and NIFTY/BANKNIFTY expiry dates",
+        tuple(STEPS[k] for k in ("holidays", "expiries_NIFTY", "expiries_BANKNIFTY"))),
     Job("insider", "07:30 and 20:30", "SEBI insider-trading disclosures, last 7 days (downloads only filings not yet stored)",
         (STEPS["insider_trades"],)),
     Job("macro_daily", "07:15", "Regime inputs: Yahoo DXY/US10Y/Brent/USD-INR/VIX and FRED daily series",
@@ -174,12 +215,17 @@ JOBS: dict[str, Job] = {j.name: j for j in (
 
 
 # --- runner -------------------------------------------------------------------------------------------
-def expected_trading_day(now: datetime) -> date:
-    """The latest weekday whose end-of-day files should exist by now (published around 18:30 IST). Exchange holidays are not
-    known here, so a holiday makes a file look one day 'behind': that is a note, never a failure."""
+def expected_trading_day(now: datetime, store: Store | None = None) -> date:
+    """The latest session whose end-of-day files should exist by now (published around 18:30 IST). With a store, NSE's
+    holiday list is used: holidays are skipped and weekend special sessions count. Without one, weekdays only, so a
+    holiday makes a file look one day 'behind': that is a note, never a failure."""
     now = now.astimezone(IST)
     d = now.date() if now.hour * 60 + now.minute >= 18 * 60 + 30 else now.date() - timedelta(days=1)
-    while d.weekday() >= 5:
+    if store is None:
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+    while not ds.is_session(store, d.isoformat()):     # holidays skipped, special sessions (Muhurat) counted
         d -= timedelta(days=1)
     return d
 
@@ -210,8 +256,10 @@ def run_job(store: Store, name: str, *, now: datetime | None = None, sleep: Call
                 log.exception("job %s step %s could not store its rows", name, step.dataset)
                 res = Result(data=res.data, as_of=res.as_of, sources=res.sources,
                              error=DrishtiError(ErrorKind.PARSE_FAIL, f"store: {type(e).__name__}: {str(e)[:200]}"))
-        if res.ok and step.daily and res.as_of and date.fromisoformat(res.as_of) < expected_trading_day(now):
-            note = f"newest available is {res.as_of}; expected {expected_trading_day(now)} (not published yet, or an exchange holiday)"
+        exp = expected_trading_day(now, store)
+        if res.ok and step.daily and res.as_of and date.fromisoformat(res.as_of) < exp:
+            known = ds.is_holiday(store, exp.isoformat()) is not None
+            note = f"newest available is {res.as_of}; expected {exp} " + ("(not published yet)" if known else "(not published yet, or a holiday: run `drishti run calendars`)")
         store.log_result(name, res, dataset=step.dataset, trade_date=res.as_of, rows=rows)
         store.record_canary(f"{name}.{step.dataset}", ok=res.ok, newest=res.as_of, error=res.error)
         report.steps.append(StepReport(step.dataset, res.ok, res.as_of, rows, time.time() - t0,

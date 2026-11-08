@@ -22,6 +22,8 @@ APP = "drishti"
 HOME_ENV = "DRISHTI_HOME"
 SETTINGS_FILE = "settings.toml"
 PROFILE_FILE = "profile.toml"
+SIGNAL_SETTINGS_FILE = "signal-settings.toml"
+SIGNAL_SETTINGS_TEMPLATE = Path(__file__).parent / "signals" / "signal-settings.template.toml"
 DB_FILE = "drishti.db"
 
 
@@ -67,6 +69,10 @@ class Settings:
     @property
     def profile_path(self) -> Path:
         return self.config_dir / PROFILE_FILE
+
+    @property
+    def signal_settings_path(self) -> Path:
+        return self.config_dir / SIGNAL_SETTINGS_FILE
 
     @property
     def db_path(self) -> Path:
@@ -151,7 +157,8 @@ def write_templates(settings: Settings) -> list[Path]:
     """Create the config files that do not exist yet. Never overwrites. Returns the files created."""
     settings.ensure_dirs()
     made: list[Path] = []
-    for path, text in ((settings.settings_path, SETTINGS_TEMPLATE), (settings.profile_path, PROFILE_TEMPLATE)):
+    for path, text in ((settings.settings_path, SETTINGS_TEMPLATE), (settings.profile_path, PROFILE_TEMPLATE),
+                       (settings.signal_settings_path, SIGNAL_SETTINGS_TEMPLATE.read_text(encoding="utf-8"))):
         if not path.exists():
             path.write_text(text, encoding="utf-8", newline="\n")
             made.append(path)

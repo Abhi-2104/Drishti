@@ -20,12 +20,13 @@ from drishti.core.envelope import DrishtiError, Result
 from drishti.core.fetch import get
 from drishti.providers import _util as u
 from drishti import resolve
-from drishti.providers import bse, cftc, fred, nse_archive, nse_flows, nse_pit, nse_shp, security_master
+from drishti.providers import nse_quote, screener
+from drishti.providers import bse, cftc, fred, nse_archive, nse_corp, nse_flows, nse_pit, nse_shp, security_master
 from drishti.providers.profiles import NSE_ARCHIVE
 from drishti.store import Store
 
 OUT = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "_raw" / "validate_live.json"
-GROUPS = ("archive", "bse", "pit", "shp", "macro", "master")
+GROUPS = ("archive", "bse", "pit", "shp", "macro", "master", "corp", "quotes", "samples", "batch3")
 
 
 def line(ok: bool, name: str, secs: float, detail: str) -> None:
@@ -145,6 +146,161 @@ def group_master(report: list, store: Store) -> None:
             print(f"     {q:<10s} -> {rr.error.kind}: {rr.error.detail[:90]}")
 
 
+def group_corp(report: list, store: Store) -> None:
+    r1 = show(report, "announcements_1d", lambda: nse_corp.announcements(days=1), lambda r: f"{len(r.data)} announcements, newest {r.as_of}")
+    r7 = show(report, "announcements_7d", lambda: nse_corp.announcements(days=7), lambda r: f"{len(r.data)} announcements over 7 days")
+    if r1.ok and r7.ok:
+        oldest = min(x["published"] for x in r7.data)
+        honoured = len(r7.data) > len(r1.data) and oldest[:10] < r1.data[-1]["published"][:10]
+        print(f"     date range honoured: {honoured} (7d oldest {oldest}; a capped feed would return the same ~20 rows)")
+        print(f"     categories: {dict(Counter(x['category'] for x in r7.data).most_common(6))}")
+    show(report, "announcements_RELIANCE", lambda: nse_corp.announcements(days=30, symbol="RELIANCE"), lambda r: f"{len(r.data)} for RELIANCE in 30 days")
+    show(report, "bse_announcements_500325", lambda: bse.announcements("500325", days=30), lambda r: f"{len(r.data)} BSE filings for 500325 in 30 days")
+    r = show(report, "corporate_actions", lambda: nse_corp.corporate_actions(), lambda r: f"{len(r.data)} actions (ex-dates -7d..+30d)")
+    if r.ok:
+        print(f"     kinds: {dict(Counter(x['kind'] for x in r.data))}; upcoming: {[(x['symbol'], x['ex_date'], x['kind']) for x in r.data if x['ex_date'] and x['ex_date'] >= str(today_ist())][:5]}")
+    r = show(report, "credit_ratings", lambda: nse_corp.credit_ratings(), lambda r: f"{len(r.data)} rating actions, newest {r.as_of}")
+    if r.ok:
+        print(f"     actions: {dict(Counter(x['action'] for x in r.data))}; by scale: {dict(Counter(x['direction_by_scale'] for x in r.data))}")
+        dn = [(x["company"], x["previous_rating"], x["rating"]) for x in r.data if x["direction_by_scale"] == "downgrade"][:3]
+        print(f"     downgrades by scale: {dn}")
+    r = show(report, "large_deals", lambda: nse_corp.large_deals(), lambda r: f"bulk {len(r.data['bulk'])}, block {len(r.data['block'])}, short {len(r.data['short'])} on {r.as_of}")
+    r = show(report, "ipos", lambda: nse_corp.ipos(), lambda r: f"current {len(r.data['current'])}, upcoming {len(r.data['upcoming'])}, closed in 30d {len(r.data['recent'])}")
+    if r.ok and (r.data["current"] or r.data["upcoming"]):
+        x = (r.data["current"] or r.data["upcoming"])[0]
+        print(f"     first open/upcoming: {x['company']} {x['open']}..{x['close']} {x['price_range']}  raw keys: {sorted(x['raw'])[:12]}")
+    show(report, "holidays", lambda: nse_corp.holidays(), lambda r: f"{len(r.data)} holiday rows (CM+FO)")
+    for sym in ("NIFTY", "BANKNIFTY"):
+        show(report, f"expiries_{sym}", lambda sym=sym: nse_corp.expiries(sym), lambda r: f"next: {r.data['expiries'][:4]}")
+    show(report, "market_status", lambda: nse_corp.market_status(),
+         lambda r: f"CM {r.data['capital_market']}, Gift Nifty {r.data['gift_nifty']['last']} at {r.data['gift_nifty']['timestamp']}, premium {r.data.get('gift_premium_pts')} pts")
+
+
+BASKET = ["RELIANCE", "HDFCBANK", "BAJFINANCE", "INFY", "SBIN", "M&M", "BAJAJ-AUTO", "ITC", "VEDL", "KAYNES", "542034"]
+
+
+def _pick_dynamic(store: Store) -> list[str]:
+    """One NSE SME stock and one recent IPO, chosen from live data so the thinnest-data cases get exercised too."""
+    out = []
+    sme = store.query("SELECT nse_symbol FROM security WHERE nse_series IN ('SM', 'ST') AND nse_symbol IS NOT NULL ORDER BY nse_listed_on DESC LIMIT 1")
+    if sme:
+        out.append(sme[0]["nse_symbol"])
+    r = nse_corp.ipos()
+    if r.ok:
+        rec = [x["symbol"] for x in r.data["recent"] if x["symbol"] and x["security_type"] != "SME"]
+        if rec:
+            out.append(rec[0])
+    return out
+
+
+def group_quotes(report: list, store: Store) -> None:
+    """Batch 2 end to end over a basket chosen for edge cases (banks, ADR/GDR issuers, '&' and '-' symbols, no promoter,
+    high pledge, midcap, BSE-only, an SME stock and a recent IPO)."""
+    from drishti import data_tools as dt
+    from drishti.config import load_settings
+    from drishti.signals import price
+    m = security_master.build_security_master(store)
+    if not m.ok:
+        print(f"     security master failed ({m.error.kind}); cannot resolve the basket")
+        return
+    names = BASKET + _pick_dynamic(store)
+    print(f"     basket: {names}")
+    with Store(load_settings().db_path) as real:          # read-only use: price history lives in your real store
+        for q in names:
+            f = show(report, f"fundamentals_{q}", lambda q=q: dt.fundamentals(store, q),
+                     lambda r: f"{r.data['company']} ({r.data['basis']}), quarter {r.as_of}, quality {r.data['quality']}")
+            show(report, f"quote_{q}", lambda q=q: dt.quote(store, q),
+                 lambda r: f"last {r.data['last']}" + (f", BSE gap {r.data['bse_cross_check']['gap_pct']}%" if r.data.get("bse_cross_check") else "")
+                 + f", live={r.data.get('live')}")
+            sec = dt.company(store, q)
+            pc = price.price_context(real, sec["isin"])
+            print(f"     price: {pc.data['label'] + ', close ' + str(pc.data['details']['close']) if pc.ok else pc.error.kind}")
+        show(report, "announcements_HDFCBANK", lambda: dt.announcements(store, "HDFCBANK", days=30),
+             lambda r: f"{len(r.data['announcements'])} merged, only on NSE {r.data['only_on_nse']}, only on BSE {r.data['only_on_bse']}")
+    show(report, "all_indices", lambda: nse_quote.all_indices(),
+         lambda r: f"{len(r.data['indices'])} indices at {r.data['timestamp']}, breadth {r.data['breadth']}, live={r.data['live']}")
+    for sym in ("NIFTY", "BANKNIFTY"):
+        show(report, f"option_chain_{sym}", lambda sym=sym: nse_quote.option_chain(sym),
+             lambda r: f"expiry {r.data['expiry']}, {len(r.data['rows'])} rows, underlying {r.data['underlying']} at {r.data['timestamp']}, live={r.data['live']}")
+
+
+def group_batch3(report: list, store: Store) -> None:
+    """Board meetings (NSE + BSE), BSE corporate actions, NSDL FPI, and the historical-deals cap: one day asked of the
+    historical endpoint must match the full count NSE states in today's large-deals snapshot."""
+    from datetime import date, timedelta
+    from drishti.providers import nsdl
+    from drishti.store import datasets as ds
+    security_master.build_security_master(store)
+    r = show(report, "board_meetings", lambda: nse_corp.board_meetings(),
+             lambda r: f"{len(r.data)} meetings {min(x['meeting_date'] for x in r.data)}..{max(x['meeting_date'] for x in r.data)}, newest intimation {r.as_of}")
+    if r.ok:
+        print(f"     kinds: {dict(Counter(x['kind'] for x in r.data))}; with ISIN {sum(1 for x in r.data if x['isin'])}/{len(r.data)}")
+        ds.persist_board_meetings(store, r.data)
+    b = show(report, "bse_result_calendar", lambda: bse.result_calendar(),
+             lambda r: f"{len(r.data)} BSE results meetings {min(x['meeting_date'] for x in r.data)}..{max(x['meeting_date'] for x in r.data)}")
+    if b.ok:
+        ds.persist_board_meetings(store, b.data)
+        mapped = store.query("SELECT COUNT(*) AS n, SUM(isin IS NOT NULL) AS m FROM board_meeting WHERE exchange='BSE'")[0]
+        both = len(ds.upcoming_meetings(store, start=str(today_ist()), end=str(today_ist() + timedelta(days=30))))
+        print(f"     BSE rows mapped to an ISIN: {mapped['m']}/{mapped['n']}; one row per company and date over 30 days: {both}")
+    a = show(report, "bse_corp_actions", lambda: bse.corporate_actions(), lambda r: f"{len(r.data)} BSE actions, kinds {dict(Counter(x['kind'] for x in r.data))}")
+    if a.ok:
+        nse_ca = nse_corp.corporate_actions()
+        if nse_ca.ok:
+            ds.persist_corp_actions(store, nse_ca.data)
+        n = ds.persist_bse_corp_actions(store, a.data)
+        print(f"     BSE actions stored after skipping ones NSE already lists: {n} of {len(a.data)}")
+    show(report, "nsdl_fpi", lambda: nsdl.fpi_daily(),
+         lambda r: f"{r.as_of}: equity net Rs {r.data['equity_net_cr']} cr (exchange {r.data['equity_exchange_net_cr']}), total {r.data['total']['net']} cr, {len(r.data['derivatives'])} derivative rows")
+    snap = nse_corp.large_deals()
+    if not snap.ok:
+        print(f"     large-deals snapshot failed ({snap.error.kind}); cannot check the historical cap")
+        return
+    day = date.fromisoformat(snap.data["as_on"])
+    for kind_ in ("bulk", "block", "short"):
+        want = len(snap.data[kind_])
+        if not want:
+            print(f"     {kind_}: snapshot is empty, nothing to compare")
+            continue
+        day = date.fromisoformat(Counter(x["date"] for x in snap.data[kind_]).most_common(1)[0][0])   # short deals run a day behind
+        h = nse_corp.historical_deals(kind_, day, day)
+        got = len(h.data["deals"]) if h.data else None
+        same_day = [x for x in snap.data[kind_] if x["date"] == str(day)]
+        verdict = "OK  " if h.ok and got == len(same_day) else "FAIL"
+        report.append({"name": f"hist_{kind_}_vs_snapshot", "ok": verdict.strip() == "OK", "detail": f"{got} vs {len(same_day)}"})
+        print(f"{verdict} hist_{kind_}_one_day           historical {got} vs snapshot {len(same_day)} on {day} (snapshot total {want})"
+              f"{'' if h.ok else '  ' + str(h.error.kind) + ': ' + h.error.detail[:90]}")
+        if h.data and got != len(same_day):
+            key = lambda x: (x["symbol"], x["qty"], x.get("client") or "-", x.get("side") or "-")  # noqa: E731
+            a, b = Counter(map(key, h.data["deals"])), Counter(map(key, same_day))
+            print(f"     only in history: {list((a - b).elements())[:5]}; only in snapshot: {list((b - a).elements())[:5]}")
+    day = date.fromisoformat(snap.data["as_on"])
+    show(report, "hist_block_30d", lambda: nse_corp.historical_deals("block", day - timedelta(days=29), day),
+         lambda r: f"{len(r.data['deals'])} block deals in 30 days using {r.data['requests']} requests, capped days {r.data['capped_days']}")
+
+
+def group_samples(report: list, store: Store) -> None:
+    """Save raw pages needed to pin parsers with real fixtures: Screener pages for a bank, an NBFC, an '&' symbol and an
+    SME (half-yearly) filer, plus today's marketStatus."""
+    from drishti.providers import nse_live
+    dst = OUT.parent / "validate_failures"
+    dst.mkdir(parents=True, exist_ok=True)
+    got = nse_live.api_get("marketStatus")
+    (dst / "marketStatus_today.json").write_bytes(got.body)
+    print(f"     saved marketStatus ({len(got.body)} bytes); giftnifty present: {bool(json.loads(got.body).get('giftnifty'))}")
+    security_master.build_security_master(store)
+    slugs = ["HDFCBANK", "BAJFINANCE", "M&M"] + [x for x in _pick_dynamic(store)[:1]]
+    for slug in slugs:
+        for cons in (True, False):
+            try:
+                body = screener._fetch(slug, cons).body
+                f = dst / f"screener_{slug.replace('&', '_')}_{'cons' if cons else 'sa'}.html"
+                f.write_bytes(body)
+                print(f"     saved {f.name} ({len(body):,} bytes)")
+            except DrishtiError as e:
+                print(f"     {slug} {'consolidated' if cons else 'standalone'}: {e.kind} {e.detail[:80]}")
+
+
 def group_shp(report: list, store: Store, sample: int) -> None:
     r = show(report, "shp_master", lambda: nse_shp.shp_master(store=store),
              lambda r: f"{len(r.data)} companies, newest covered quarter {r.as_of}")
@@ -197,7 +353,7 @@ def main(argv=None) -> int:
         for g in args.only or GROUPS:
             print(f"== {g}")
             {"archive": lambda: group_archive(report, store), "bse": lambda: group_bse(report, store),
-             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "master": lambda: group_master(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
+             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "master": lambda: group_master(report, store), "corp": lambda: group_corp(report, store), "quotes": lambda: group_quotes(report, store), "samples": lambda: group_samples(report, store), "batch3": lambda: group_batch3(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
             print()
         bad = [r["name"] for r in report if not r["ok"]]
         print(f"{len(report) - len(bad)} ok, {len(bad)} failed" + (f": {', '.join(bad)}" if bad else ""))

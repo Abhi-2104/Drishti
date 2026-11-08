@@ -65,7 +65,7 @@ def test_bad_settings_raise_config_error_naming_the_file(tmp_path, body, needle)
 def test_templates_created_once_never_overwritten(tmp_path):
     s = load_settings({"DRISHTI_HOME": str(tmp_path / "home")})
     made = write_templates(s)
-    assert {p.name for p in made} == {"settings.toml", "profile.toml"}
+    assert {p.name for p in made} == {"settings.toml", "profile.toml", "signal-settings.toml"}
     s.profile_path.write_text('name = "mine"\n', encoding="utf-8")
     assert write_templates(s) == []
     assert s.profile_path.read_text(encoding="utf-8") == 'name = "mine"\n'
