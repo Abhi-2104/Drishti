@@ -151,3 +151,22 @@ def test_cli_jobs_run_health(tmp_path, monkeypatch, capsys):
     assert "status: degraded" in out and "t.bad" in out and "canary FAIL" in out
     only(monkeypatch, jobs.Step("good", lambda s, t: Result(data=[1], as_of="2026-11-06")))
     assert main(["run", "t"]) == 0
+
+
+def test_bse_bhavcopy_asks_for_the_day_nse_published(monkeypatch):
+    """BSE serves an HTML page for a file not yet published; asking for NSE's newest day avoids reading that as a block."""
+    from datetime import date as _d
+    from drishti import jobs
+    from drishti.core.envelope import Result
+    from drishti.store import Store
+    from drishti.store import datasets as ds
+    st = Store()
+    asked = []
+    monkeypatch.setattr(jobs.bse_provider, "bhavcopy", lambda d, store=None: asked.append(d) or Result(data=[], as_of=d.isoformat()))
+    jobs._bse_bhavcopy(st, _d(2026, 11, 9))                     # nothing from NSE yet: walks back from today as before
+    assert asked[0] == _d(2026, 11, 9)
+    asked.clear()
+    ds.persist_prices(st, [{"trade_date": "2026-11-06", "isin": "INE002A01018", "series": "EQ", "symbol": "RELIANCE", "open": 1, "high": 1,
+                            "low": 1, "close": 1, "prev_close": 1, "volume": 1, "turnover": 1, "trades": 1}], "NSE")
+    jobs._bse_bhavcopy(st, _d(2026, 11, 8))
+    assert asked == [_d(2026, 11, 6)]

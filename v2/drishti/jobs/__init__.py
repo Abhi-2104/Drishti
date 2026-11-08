@@ -85,6 +85,17 @@ def _latest(fn) -> Callable[[Store, date], Result]:
     return lambda store, today: u.latest(lambda d: fn(d, store=store), today, sessions=ds.special_sessions(store))
 
 
+def _bse_bhavcopy(store: Store, today: date) -> Result:
+    """BSE answers a missing bhavcopy with an HTML page, not a 404, so walking back day by day cannot tell 'not
+    published yet' from a block. Both exchanges trade the same sessions, so ask BSE for the newest day NSE's file
+    exists for (the cm_bhavcopy step runs first); an HTML answer for that day is a real problem and is reported."""
+    ds.ensure(store, "price_eod")
+    row = store.query("SELECT MAX(trade_date) AS d FROM price_eod WHERE exchange='NSE' AND trade_date <= ?", (today.isoformat(),))
+    if not row or not row[0]["d"]:
+        return u.latest(lambda d: bse_provider.bhavcopy(d, store=store), today, sessions=ds.special_sessions(store))
+    return bse_provider.bhavcopy(date.fromisoformat(row[0]["d"]), store=store)
+
+
 def _insider_run(store: Store, today: date) -> Result:
     store.ensure_table(INSIDER_DDL)
     since = (today - timedelta(days=14)).isoformat()
@@ -153,7 +164,7 @@ WEEKLY_FRED = ("WALCL", "M2SL")
 STEPS = {
     "cm_bhavcopy": Step("cm_bhavcopy", _latest(nse_archive.cm_bhavcopy), persist=lambda st, r: ds.persist_prices(st, r.data, "NSE"), daily=True),
     "fo_bhavcopy": Step("fo_bhavcopy", _latest(nse_archive.fo_bhavcopy), persist=_p(ds.persist_fo_index), daily=True),
-    "bse_bhavcopy": Step("bse_bhavcopy", _latest(bse_provider.bhavcopy), persist=lambda st, r: ds.persist_prices(st, r.data, "BSE"), daily=True),
+    "bse_bhavcopy": Step("bse_bhavcopy", lambda s, t: _bse_bhavcopy(s, t), persist=lambda st, r: ds.persist_prices(st, r.data, "BSE"), daily=True),
     "participant_oi": Step("participant_oi", _latest(nse_archive.participant_oi), persist=_p(ds.persist_participant_oi), daily=True),
     "index_closes": Step("index_closes", _latest(nse_archive.index_closes), persist=_p(ds.persist_index_closes), daily=True),
     "fo_ban_list": Step("fo_ban_list", _latest(nse_archive.fo_ban_list), daily=True),
