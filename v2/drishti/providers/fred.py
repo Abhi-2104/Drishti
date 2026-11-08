@@ -18,8 +18,16 @@ SOURCE = "fred"
 URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={}"
 # series -> max age (calendar days) of the newest observation. Verified against live files on 2026-11-07.
 SERIES: dict[str, int] = {
-    "DTWEXBGS": 14,  # Nominal Broad US Dollar Index, daily, published with about a week's lag
-    "WALCL": 12,     # Fed total assets (Wednesday level), weekly
+    "DTWEXBGS": 14,  # Nominal Broad US Dollar Index, daily, published with about a week's lag      (verified 7 Nov)
+    "WALCL": 12,     # Fed total assets (Wednesday level), weekly                                   (verified 7 Nov)
+    # Not yet verified live; windows are from FRED's published cadence and get confirmed on the first real run.
+    "M2SL": 75,          # US M2, monthly, released ~4 weeks after month end
+    "BAMLH0A0HYM2": 7,   # ICE BofA US high-yield option-adjusted spread, daily
+    "T10Y2Y": 7,         # 10Y minus 2Y Treasury, daily
+    "DGS10": 7,          # 10Y Treasury constant maturity, daily (cross-check for Yahoo ^TNX)
+    "DCOILBRENTEU": 14,  # Brent spot, daily, about a week's lag (cross-check for Yahoo BZ=F)
+    "DEXINUS": 14,       # USD/INR noon buying rate, daily, about a week's lag (cross-check for Yahoo INR=X)
+    "VIXCLS": 7,         # CBOE VIX close, daily (cross-check for Yahoo ^VIX)
 }
 _ID = re.compile(r"^[A-Z0-9_]{1,30}$")
 _DATE_COLS = ("observation_date", "DATE")
@@ -61,6 +69,8 @@ def fred_series(series_id: str, *, max_age_days: int | None = None, tail: int = 
     rows = parse_fred(got.body, series_id)
     newest = check_fresh(rows, "date", max_age_days, f"fred_{series_id}", today=today)
     if store is not None:
+        from ..store.datasets import persist_macro
         store.put_blob(f"fred_{series_id}", newest, got, SOURCE)
+        persist_macro(store, f"fred:{series_id}", rows, SOURCE)
     data = {"series_id": series_id, "observations": rows[-tail:], "latest": rows[-1], "n_total": len(rows)}
     return Result(data=data, as_of=newest.isoformat(), sources=[got.source(SOURCE)])

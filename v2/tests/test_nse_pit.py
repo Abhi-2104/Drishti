@@ -242,3 +242,18 @@ def test_placeholder_isin_does_not_become_a_join_key():
     body = re.sub(rb'(ISINCode[^>]*>)[^<]*', rb"\1ZZZ999Z99999", xml(KRONOX_NEW))
     (e,) = p.parse_pit_filing(body)
     assert e["isin"] is None and e["isin_raw"] == "ZZZ999Z99999" and e["isin_valid"] is False and e["symbol"] == "KRONOX"
+
+
+def test_throttling_stops_the_run_instead_of_grinding(net, monkeypatch):
+    """Live run 8 Nov: NSE began timing out after ~1,500 requests and one window ran for 30+ minutes."""
+    n = net(listing(12))
+    calls = []
+
+    def slow(url, profile, expect="xml", **k):
+        calls.append(url)
+        raise DrishtiError(ErrorKind.TIMEOUT, "read timeout")
+    monkeypatch.setattr(p, "get", slow)
+    msgs = []
+    r = p.insider_trades(7, today=TODAY, max_failed_frac=1.0, progress=msgs.append)
+    assert r.error.kind == ErrorKind.TIMEOUT and "in a row" in r.error.detail and len(calls) == 5
+    assert r.data["events"] == [] and len(r.data["failed"]) == 5

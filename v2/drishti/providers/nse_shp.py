@@ -267,6 +267,17 @@ def shp_master(*, days: int = 130, today: date | None = None, store=None, min_co
 
 
 @guard
+def shp_master_rows(*, days: int, today: date | None = None) -> Result:
+    """Every filing row in the window (all quarters, revisions included), for history backfills. No coverage check:
+    the caller picks the quarters it wants."""
+    today = today or today_ist()
+    got = nse_live.api_get("corporate-share-holdings-master", index="equities",
+                           from_date=(today - timedelta(days=days)).strftime("%d-%m-%Y"), to_date=today.strftime("%d-%m-%Y"))
+    rows = parse_shp_master(got.body)
+    return Result(data=rows, as_of=max(r["as_on"] for r in rows), sources=[got.source(SOURCE)])
+
+
+@guard
 def shp_filing(xbrl_url: str) -> Result:
     """Promoter holding and encumbrance (pledge / NDU / other) from one company's filing."""
     got = get(xbrl_url, NSE_ARCHIVE, expect="xml")

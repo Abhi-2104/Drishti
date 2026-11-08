@@ -165,7 +165,8 @@ def _dmy(d: date) -> str:
 
 @guard
 def insider_trades(days: int = 7, *, today: date | None = None, max_filings: int = 300, skip_app_ids=(),
-                   max_failed_frac: float = 0.2, max_age_days: int = 5) -> Result:
+                   max_failed_frac: float = 0.2, max_age_days: int = 5, max_consecutive_failures: int = 5,
+                   progress=None) -> Result:
     """Insider trades filed in the last `days` days. data = {"events": [...], "filings": n, "failed": [...],
     "duplicates_dropped": n}. Partial failure is never hidden: failed filings are listed with their typed kind, and
     the Result itself is an error if more than `max_failed_frac` of the filings failed (a layout change looks
@@ -178,18 +179,30 @@ def insider_trades(days: int = 7, *, today: date | None = None, max_filings: int
     skip = set(skip_app_ids)
     todo = [r for r in sorted(listing, key=lambda r: r["broadcast"], reverse=True)
             if r["app_id"] not in superseded and r["app_id"] not in skip][:max_filings]
-    events, failed = [], []
-    for r in todo:
+    events, failed, streak, stopped = [], [], 0, None
+    for i, r in enumerate(todo, 1):
+        if progress and i % 25 == 0:
+            progress(f"      ...{i}/{len(todo)} filings, {len(failed)} failed")
         try:
             x = get(r["xml_url"], NSE_ARCHIVE, expect="xml")
             for ev in parse_pit_filing(x.body):
                 ev.update(app_id=r["app_id"], filed_at=r["broadcast"], submission_type=r["submission_type"])
                 events.append(ev)
+            streak = 0
         except DrishtiError as e:
             failed.append({"app_id": r["app_id"], "symbol": r["symbol"], "kind": str(e.kind), "detail": e.detail[:160]})
+            if e.kind in (ErrorKind.BLOCKED, ErrorKind.BLOCKED_HTML, ErrorKind.TIMEOUT, ErrorKind.NETWORK):
+                streak += 1
+                if streak >= max_consecutive_failures:   # the host is throttling: stop instead of grinding through timeouts
+                    stopped = e.kind
+                    break
     deduped = dedupe_events(events)
     data = {"events": deduped, "filings": len(todo), "failed": failed, "duplicates_dropped": len(events) - len(deduped)}
     srcs = [got.source(SOURCE)]
+    if stopped:
+        return Result(data=data, as_of=newest.isoformat(), sources=srcs,
+                      error=DrishtiError(stopped, f"pit: stopped after {max_consecutive_failures} {stopped} failures in a row "
+                                                  f"({len(events)} events from the filings before that are kept); NSE is throttling"))
     if todo and len(failed) / len(todo) > max_failed_frac:
         kinds = sorted({f["kind"] for f in failed})
         return Result(data=data, as_of=newest.isoformat(), sources=srcs,

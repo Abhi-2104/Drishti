@@ -17,3 +17,6 @@ NSE_WARM = replace(NSE, retries=0)
 # Public data services that publish for programmatic use: identify ourselves honestly instead of posing as a browser.
 FRED = Profile("fred", {"User-Agent": HONEST_UA, "Accept": "text/csv,*/*"}, timeout=(5.0, 30.0))
 CFTC = Profile("cftc", {"User-Agent": HONEST_UA, "Accept": "text/plain,*/*"}, timeout=(5.0, 30.0))
+
+# Yahoo chart API: browser-like headers, as in Phase 0 (capture_fixtures.YAHOO).
+YAHOO = Profile("yahoo", browser_headers({"Accept": "application/json"}), timeout=(5.0, 15.0))
