@@ -1,0 +1,12 @@
+You made a call on each Indian equity case below, and a critic has reviewed it. Decide again, alone.
+
+Files to judge (read each one, nothing else): @FILES@
+
+Each file holds "bundle" (the evidence, built only from data known on its as_of date), "your_original_answer" and "critique".
+
+Rules:
+1. Use only what is inside the file. Do not search the web, do not use any memory of what happened after the as_of date, do not open other files. Anything under "unknown" is unknown, not neutral.
+2. Weigh the critique on its merits. Keep your call if the critique does not persuade you; change it only for a reason that is in the bundle. Do not change just to please the critic, and do not dig in just to be consistent.
+3. For each file write ONE JSON object on its own line to the file @OUT@ (create it, one line per file, no other text), in the same format as your original answers:
+   case_id, action (one of answer_with.allowed_actions), horizon_days (answer_with.horizon_days), confidence (0.50 to 0.99 = the probability the call turns out right over the horizon; omit for a no-call), thesis (20+ characters; say in one clause what the critique changed or why you held), invalidation (an observable event that would prove the call wrong: a price level, a signal reading or a dated event; required for any call, omit for a no-call), signals (names of bundle signals you leaned on; only names present in the bundle).
+4. When finished, reply with only the number of lines written.

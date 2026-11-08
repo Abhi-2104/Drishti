@@ -37,8 +37,8 @@ Providers and signals only report. This layer is where a call is made, written d
 ```
 uv run drishti decisions cases --start 2026-07-01 --end 2026-08-10 --every 3 --n-stocks 8 --gate entry,macro --cases eval\cases.json
 uv run drishti decisions rules  --cases eval\cases.json
-uv run drishti decisions export --cases eval\cases.json --out eval\bundles          # blind by default; agents get only these files
-uv run drishti decisions import --key eval\bundles\_key.json --answers eval\claude.jsonl --agent claude --model <model name>
+uv run drishti decisions export --cases eval\cases.json --out eval\bundles          # blind by default; the key goes to eval\bundles_key.json, outside the folder agents read
+uv run drishti decisions import --key eval\bundles_key.json --answers eval\claude.jsonl --agent claude --model <model name>
 uv run drishti decisions score
 uv run drishti decisions compare --a claude/<model> --b rules/<rules version> --gate entry
 ```

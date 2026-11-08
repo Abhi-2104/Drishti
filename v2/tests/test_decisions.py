@@ -295,20 +295,23 @@ def test_rules_on_cases_then_blind_bundles_then_answers_roundtrip(st, tmp_path):
     res = cases.run_rules(st, cs)
     assert res["recorded"] == len(cs) and res["failed"] == 0
     assert cases.run_rules(st, cs)["already_logged"] == len(cs)
-    out = cases.export_bundles(st, cs, tmp_path, blind=True)
-    assert out["written"] == len(cs) and (tmp_path / "_key.json").exists()
-    assert not any(UP in f.read_text() or "RISER" in f.read_text() for f in tmp_path.glob("case-*.json"))
-    first = sorted(tmp_path.glob("case-*.json"))[0].stem
+    bundles = tmp_path / "bundles"
+    out = cases.export_bundles(st, cs, bundles, blind=True)
+    keyf = tmp_path / "bundles_key.json"
+    assert out["written"] == len(cs) and keyf.exists() and out["key"] == str(keyf)
+    assert not (bundles / "_key.json").exists() and not list(bundles.glob("*key*"))          # the key is outside the agents' folder
+    assert not any(UP in f.read_text() or "RISER" in f.read_text() for f in bundles.glob("case-*.json"))
+    first = sorted(bundles.glob("case-*.json"))[0].stem
     answers = tmp_path / "a.jsonl"
     answers.write_text('{"case_id": "%s", "action": "ENTER", "horizon_days": 60, "confidence": 0.6, "thesis": "Uptrend with strength against the index.", '
                        '"invalidation": "closes below the 50-day average", "signals": ["price_context"]}\n'
                        '{"case_id": "nope", "action": "ENTER"}\n{"case_id": "%s", "action": "BUY"}\nnot json\n' % (first, first), encoding="utf-8")
-    r = cases.import_answers(st, tmp_path / "_key.json", answers, agent="claude", model="m1")
+    r = cases.import_answers(st, keyf, answers, agent="claude", model="m1")
     assert r["recorded"] == 1 and r["rejected"] == 3
     d = log.current(st, agent="claude")[0]
     wrong = tmp_path / "w.jsonl"
     wrong.write_text('{"case_id": "%s", "action": "WAIT", "horizon_days": 20, "thesis": "x"}\n' % first, encoding="utf-8")
-    assert "horizon_days must be 60" in cases.import_answers(st, tmp_path / "_key.json", wrong, agent="c2", model="m")["rejections"][0]["why"]
+    assert "horizon_days must be 60" in cases.import_answers(st, keyf, wrong, agent="c2", model="m")["rejections"][0]["why"]
     assert d["horizon_days"] == 60 and d["isin"] in (UP, DOWN) and d["bundle_sha"] and d["as_of"] in {c["as_of"] for c in cs}
 
 

@@ -84,8 +84,15 @@ def export_bundles(store, cases: list[dict], out_dir: Path, *, blind: bool = Tru
         cid = f"case-{i:05d}" if blind else c["case_id"]
         (out_dir / f"{cid}.json").write_text(json.dumps({"case_id": cid, **r.data}, indent=1, default=str), encoding="utf-8")
         key[cid] = {**c, "bundle_sha": r.data["bundle_sha"]}
-    Path(out_dir / "_key.json").write_text(json.dumps(key, indent=1), encoding="utf-8")
-    return {"written": len(key), "failed": bad[:20], "failed_count": len(bad), "blind": blind}
+    key_path = key_file(out_dir)
+    key_path.write_text(json.dumps(key, indent=1), encoding="utf-8")
+    return {"written": len(key), "failed": bad[:20], "failed_count": len(bad), "blind": blind, "key": str(key_path)}
+
+
+def key_file(out_dir: Path) -> Path:
+    """The key lives NEXT TO the bundle folder, never inside it: an agent allowed to read the bundles must not be able to read it."""
+    out_dir = Path(out_dir)
+    return out_dir.parent / f"{out_dir.name}_key.json"
 
 
 def import_answers(store, key_path: Path, answers_path: Path, *, agent: str, model: str) -> dict:
