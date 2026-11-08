@@ -123,6 +123,65 @@ def tool_disclosure_screen(store: Store, as_of: str | None = None) -> dict:
         return _env(Result(error=DrishtiError(ErrorKind.PARSE_FAIL, f"bad as_of date: {e}")))
 
 
+def _stock_isin(store: Store, query: str | None) -> str:
+    r = resolver.resolve(store, query or "")
+    if not r.ok:
+        raise r.error
+    if r.data["ambiguous"]:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{query!r} matches several companies, pass an ISIN")
+    return r.data["matches"][0]["isin"]
+
+
+def tool_gather(store: Store, gate: str, as_of: str, query: str | None = None, blind: bool = False) -> dict:
+    """Everything a decision for this gate may use, as of a date, with a hash that proves two authors saw the same evidence."""
+    from .decisions import gather
+    try:
+        isin = _stock_isin(store, query) if query else None
+        return _env(gather.gather(store, gate, as_of, isin=isin, blind=blind))
+    except DrishtiError as e:
+        return _env(Result(error=e))
+
+
+def tool_record_decision(store: Store, gate: str, as_of: str, action: str, horizon_days: int, thesis: str, agent: str, model: str,
+                         signals: list[str], query: str | None = None, confidence: float | None = None, invalidation: str | None = None,
+                         bundle_sha: str | None = None, supersedes: str | None = None) -> dict:
+    from .decisions import log
+    try:
+        isin = _stock_isin(store, query) if query else None
+        sym = (store.get_security(isin) or {}).get("nse_symbol") if isin else None
+        return _env(log.record(store, gate=gate, as_of=as_of, action=action, horizon_days=horizon_days, thesis=thesis, agent=agent, model=model,
+                               signals_cited=signals, isin=isin, symbol=sym, confidence=confidence, invalidation=invalidation,
+                               bundle_sha=bundle_sha, supersedes=supersedes))
+    except DrishtiError as e:
+        return _env(Result(error=e))
+
+
+def tool_get_decisions(store: Store, gate: str | None = None, agent: str | None = None, model: str | None = None, query: str | None = None,
+                       since: str | None = None, until: str | None = None, limit: int = 50) -> dict:
+    from .decisions import log
+    try:
+        isin = _stock_isin(store, query) if query else None
+        rows = log.current(store, gate=gate, agent=agent, model=model, isin=isin, since=since, until=until, limit=max(1, min(int(limit), 500)))
+        return _env(Result(data={"decisions": rows, "n": len(rows)}, as_of=rows[0]["as_of"] if rows else None))
+    except DrishtiError as e:
+        return _env(Result(error=e))
+
+
+def tool_score_decisions(store: Store, gate: str | None = None, agent: str | None = None, model: str | None = None, since: str | None = None,
+                         until: str | None = None, compare: list[str] | None = None) -> dict:
+    """Per-author scorecard (pending and missing-data cases are counted, never dropped) and, with compare=['a/model','b/model'], a paired
+    comparison that names a winner only with enough cases and a clear interval."""
+    from .decisions import score
+    rows = score.score_all(store, gate=gate, agent=agent, model=model, since=since, until=until)
+    rows = rows + score.baseline_rows(rows)
+    data = {"summary": score.summarise(rows), "method": score.SCORE_VERSION}
+    if compare:
+        if len(compare) != 2:
+            return _env(Result(error=DrishtiError(ErrorKind.PARSE_FAIL, "compare takes two authors, each written agent/model")))
+        data["comparison"] = score.compare(rows, compare[0], compare[1], gate=gate)
+    return _env(Result(data=data, as_of=max((r["as_of"] for r in rows), default=None)))
+
+
 SIGNAL_TOOLS = {   # tool name -> (signal name, description). v1 names kept where v1 had the tool.
     "get_macro_regime": ("macro_regime", "Macro tide, -6..+6: DXY, US 10Y, Brent, India VIX, USD/INR move, US-vs-India VIX (v1 thresholds)."),
     "get_participant_oi": ("participant_oi", "Derivatives smart money: (FII + Pro) - Client from NSE participant OI; +/-4 = strong."),
@@ -301,6 +360,38 @@ def build_server(open_store: Callable[[], Store]):
         """Intraday option chain for an index and expiry (default nearest). Live in market hours; closing state after."""
         from .providers import nse_quote
         return _env(nse_quote.option_chain(symbol.upper(), expiry))
+
+    @srv.tool()
+    def gather_evidence(gate: str, as_of: str, query: str | None = None, blind: bool = False) -> dict:
+        """Evidence bundle for one decision (gate: entry, exit, screen, macro; stock gates need `query`), computed only from data up to
+        `as_of`, with its hash and the allowed actions. blind=true hides the stock's identity."""
+        with open_store() as st:
+            return tool_gather(st, gate, as_of, query, blind)
+
+    @srv.tool()
+    def record_decision(gate: str, as_of: str, action: str, horizon_days: int, thesis: str, agent: str, model: str, signals: list[str],
+                        query: str | None = None, confidence: float | None = None, invalidation: str | None = None,
+                        bundle_sha: str | None = None, supersedes: str | None = None) -> dict:
+        """Append one decision to the log (never edited; correct with supersedes). confidence = probability the call turns out right over
+        horizon_days trading sessions (0.50..0.99; omit for a no-call). A call needs thesis, invalidation and at least one cited signal."""
+        with open_store() as st:
+            return tool_record_decision(st, gate, as_of, action, horizon_days, thesis, agent, model, signals, query, confidence, invalidation,
+                                        bundle_sha, supersedes)
+
+    @srv.tool()
+    def get_decisions(gate: str | None = None, agent: str | None = None, model: str | None = None, query: str | None = None,
+                      since: str | None = None, until: str | None = None, limit: int = 50) -> dict:
+        """Logged decisions (current ones, newest first), filterable by gate, author, company and date."""
+        with open_store() as st:
+            return tool_get_decisions(st, gate, agent, model, query, since, until, limit)
+
+    @srv.tool()
+    def score_decisions(gate: str | None = None, agent: str | None = None, model: str | None = None, since: str | None = None,
+                        until: str | None = None, compare: list[str] | None = None) -> dict:
+        """How logged decisions turned out against the Nifty 50 (stock gates) or cash (macro gate): hit rate, edge, calibration per author,
+        plus a free always-long baseline. compare=['agent/model','agent/model'] adds a paired comparison."""
+        with open_store() as st:
+            return tool_score_decisions(st, gate, agent, model, since, until, compare)
 
     return srv
 

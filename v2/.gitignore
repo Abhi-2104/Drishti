@@ -8,3 +8,6 @@ phase0/scout/retest_report.md
 # Test fixtures are copies of exchange / data-provider responses: data, kept out of git. Their checksums are tracked in
 # tests/fixtures.lock; move them between machines with tests/fixtures_tool.py pack / unpack.
 tests/fixtures/
+
+# Evaluation runs (case files, evidence bundles, agent answers) hold stored market data: never committed
+eval/

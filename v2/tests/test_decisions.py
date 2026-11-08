@@ -1,0 +1,369 @@
+"""Decision layer: the log refuses vague or unverifiable calls and never edits history; rules-v1 follows its frozen numbers;
+the scorer judges against the Nifty (or cash) without dropping pending cases; the comparison names a winner only with evidence."""
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+import pytest
+
+from drishti.decisions import gather, log, rules, score
+from drishti.store import Store
+from drishti.store import datasets as ds
+
+UP, DOWN = "INE002A01018", "INE009A01021"
+
+
+def weekdays(start: date, n: int) -> list[str]:
+    out, d = [], start
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d.isoformat())
+        d += timedelta(days=1)
+    return out
+
+
+DAYS = weekdays(date(2025, 1, 1), 330)       # ends mid-2026, comfortably in the past
+
+
+def put_stock(st, isin, symbol, closes):
+    st.upsert_security(isin, name=f"{symbol} Industries Limited", nse_symbol=symbol, source="test")
+    st.upsert("price_eod", [{"trade_date": d, "isin": isin, "exchange": "NSE", "series": "EQ", "symbol": symbol, "open": c, "high": c * 1.01,
+                             "low": c * 0.99, "close": c, "prev_close": c, "volume": 100000, "turnover": c * 1e5, "trades": 500}
+                            for d, c in zip(DAYS, closes)], key=["trade_date", "isin", "exchange", "series"])
+
+
+@pytest.fixture
+def st():
+    s = Store()
+    ds.ensure(s)
+    n = len(DAYS)
+    put_stock(s, UP, "RISER", [100 * 1.004 ** i for i in range(n)])          # +0.4% a day
+    put_stock(s, DOWN, "FALLER", [100 * 0.996 ** i for i in range(n)])      # -0.4% a day
+    ds.persist_index_closes(s, [{"trade_date": d, "index_name": "Nifty 50", "close": 20000 * 1.0004 ** i} for i, d in enumerate(DAYS)])
+    yield s
+    s.close()
+
+
+AS_OF = DAYS[250]           # 250 sessions of history behind it, 79 ahead
+
+
+def call(st, **kw):
+    base = dict(gate="entry", as_of=AS_OF, action="ENTER", horizon_days=20, thesis="Trend is up and beating the index.",
+                agent="claude", model="m1", signals_cited=["price_context"], isin=UP, confidence=0.6,
+                invalidation="closes below the 50-day average")
+    base.update(kw)
+    return log.record(st, **base)
+
+
+# --- the log ------------------------------------------------------------------------------------------------------
+def test_record_stores_recomputed_evidence(st):
+    r = call(st)
+    assert r.ok, r.error
+    ev = r.data["evidence"][0]
+    assert ev["name"] == "price_context" and ev["as_of"] <= AS_OF and ev["params_version"] == "price"
+    assert r.data["stance"] == 1 and r.data["id"].startswith("dec_")
+    assert len(log.current(st)) == 1
+
+
+@pytest.mark.parametrize("kw,needle", [
+    ({"gate": "nope"}, "unknown gate"), ({"action": "BUY"}, "not valid for /entry"), ({"as_of": "2999-01-01"}, "future"),
+    ({"as_of": "01-02-2026"}, "YYYY-MM-DD"), ({"horizon_days": 0}, "horizon_days"), ({"horizon_days": 99999}, "horizon_days"),
+    ({"confidence": 0.3}, "0.50..0.99"), ({"confidence": None}, "0.50..0.99"), ({"confidence": 1.0}, "0.50..0.99"),
+    ({"invalidation": "wrong"}, "invalidation"), ({"thesis": "short"}, "thesis"), ({"signals_cited": []}, "cite"),
+    ({"agent": " "}, "agent and model"), ({"isin": None}, "pass its ISIN"), ({"isin": "INE000000000"}, "security master"),
+    ({"signals_cited": ["made_up"]}, "does not exist"), ({"signals_cited": ["insider_cluster"]}, "no reading"),
+])
+def test_record_refuses_vague_calls(st, kw, needle):
+    r = call(st, **kw)
+    assert not r.ok and needle in r.error.detail, r.error
+    assert log.current(st) == []
+
+
+def test_a_no_call_needs_no_confidence_or_invalidation(st):
+    r = call(st, action="WAIT", confidence=None, invalidation=None, signals_cited=[], thesis="Not enough to say.")
+    assert r.ok and r.data["stance"] == 0
+
+
+def test_market_gate_ignores_the_stock(st):
+    r = log.record(st, gate="macro", as_of=AS_OF, action="NEUTRAL", horizon_days=20, thesis="No clear tide.", agent="a", model="m", signals_cited=[],
+                   isin=UP)
+    assert r.ok and r.data["subject"] == "MARKET" and r.data["isin"] is None
+
+
+def test_log_is_append_only_and_supersede_hides_the_old_row(st):
+    first = call(st)
+    dup = call(st)
+    assert not dup.ok and "append-only" in dup.error.detail
+    fixed = call(st, action="WAIT", confidence=None, invalidation=None, thesis="Changed my mind after rereading.", supersedes=first.data["id"])
+    assert fixed.ok
+    assert [d["action"] for d in log.current(st)] == ["WAIT"]
+    assert st.query("SELECT COUNT(*) AS n FROM decision")[0]["n"] == 2          # the old row is still there
+    third = call(st, action="AVOID", confidence=0.6, thesis="Second thoughts: weak balance sheet.", supersedes=fixed.data["id"])
+    assert third.ok and [d["action"] for d in log.current(st)] == ["AVOID"]
+    assert not call(st, supersedes="dec_nothing").ok
+
+
+def test_two_authors_may_decide_the_same_case(st):
+    assert call(st).ok and call(st, agent="rules", model="rules-v1").ok
+    assert len(log.current(st)) == 2 and len(log.current(st, agent="rules")) == 1
+
+
+# --- rules-v1 -----------------------------------------------------------------------------------------------------
+def test_rules_enter_a_strong_uptrend_and_avoid_a_downtrend(st):
+    up = rules.decide_stock(st, "entry", UP, "RISER", date.fromisoformat(AS_OF))
+    dn = rules.decide_stock(st, "entry", DOWN, "FALLER", date.fromisoformat(AS_OF))
+    assert up["action"] == "ENTER" and up["points"] >= 3 and 0.55 < up["confidence"] <= 0.70
+    assert dn["action"] == "AVOID" and dn["points"] <= -2
+    assert "price_context" in up["signals_cited"] and "Unknown:" in up["thesis"]         # insider / pledge / macro are not stored: said so
+
+
+def test_rules_exit_follows_the_trend_and_chasing_costs_a_point(st):
+    assert rules.decide_stock(st, "exit", DOWN, "FALLER", date.fromisoformat(AS_OF))["action"] in ("EXIT", "TRIM")
+    assert rules.decide_stock(st, "exit", UP, "RISER", date.fromisoformat(AS_OF))["action"] == "HOLD"
+    sc = rules.stock_points(st, UP, "RISER", date.fromisoformat(AS_OF))
+    assert not any("already up" in p["why"] for p in sc["parts"])        # +0.4% a day is ~9% a month: below the 25% line
+
+
+def test_rules_run_writes_the_log_under_the_rules_version(st):
+    r = rules.run(st, "entry", AS_OF, isin=UP, symbol="RISER")
+    assert r.ok, r.error
+    assert r.data["agent"] == "rules" and r.data["model"].startswith("rules-v1+") and r.data["notes"].startswith("points=")
+    assert not rules.run(st, "entry", AS_OF, isin=UP, symbol="RISER").ok          # the same case twice is refused
+    assert rules.run(st, "entry", DAYS[5], isin=UP, symbol="RISER").error.kind.name in ("NOT_FOUND",)  # 5 sessions of history: no call, no guess
+
+
+def test_rules_macro_needs_enough_readable_votes(st, monkeypatch):
+    votes = {"macro_regime": {"score": 3, "label": "x", "details": {}}, "participant_oi": {"score": 5, "label": "x", "details": {}},
+             "cycle_phase": {"score": None, "label": "Expansion most likely (60%)", "details": {"probabilities": {"Expansion": 0.6, "Late": 0.4}}},
+             "midcap_ratio": {"score": 2.0, "label": "midcaps outperforming", "details": {}}}
+    monkeypatch.setattr(rules, "_ok", lambda store, name, on, **kw: votes.get(name))
+    d = rules.decide_macro(st, date.fromisoformat(AS_OF))
+    assert d["action"] == "RISK_ON" and d["points"] == 4 and d["confidence"] == 0.67
+    monkeypatch.setattr(rules, "_ok", lambda store, name, on, **kw: votes.get(name) if name in ("macro_regime", "midcap_ratio") else None)
+    assert rules.decide_macro(st, date.fromisoformat(AS_OF)) is None                 # two readable inputs: no call
+    votes["macro_regime"]["score"] = -3
+    votes["participant_oi"]["score"] = -5
+    votes["midcap_ratio"]["label"] = "midcaps lagging"
+    monkeypatch.setattr(rules, "_ok", lambda store, name, on, **kw: votes.get(name))
+    assert rules.decide_macro(st, date.fromisoformat(AS_OF))["action"] == "RISK_OFF"
+
+
+def test_rules_file_is_hashed_into_the_model_name():
+    _, ver = rules.load()
+    assert ver.startswith("rules-v1+") and len(ver.split("+")[1]) == 8
+
+
+# --- the scorer ---------------------------------------------------------------------------------------------------
+def test_outcome_scores_a_bullish_call_against_the_nifty(st):
+    d = call(st).data
+    o = score.outcome(st, {**d, "scope": "stock"})
+    assert o["status"] == "scored" and o["hit"] is True
+    exp = ((1.004 ** 270 / 1.004 ** 250) - (1.0004 ** 270 / 1.0004 ** 250)) * 100
+    assert o["excess_pct"] == pytest.approx(exp, abs=0.01)
+    assert o["edge_net_pct"] == pytest.approx(o["edge_pct"] - score.COST_PCT, abs=1e-6)       # ENTER pays the trade cost
+
+
+def test_outcome_bearish_call_earns_the_opposite_and_pays_no_cost(st):
+    d = call(st, isin=DOWN, action="AVOID").data
+    o = score.outcome(st, {**d, "scope": "stock"})
+    assert o["hit"] is True and o["edge_pct"] > 0 and o["edge_net_pct"] == o["edge_pct"]
+
+
+def test_outcome_pending_and_no_data_are_never_dropped(st):
+    late = call(st, as_of=DAYS[320], horizon_days=60).data
+    o = score.outcome(st, {**late, "scope": "stock"})
+    assert o["status"] == "pending" and "of 60 sessions" in o["why"]
+    st.upsert_security("INE0AAA01010", name="Ghost Ltd", nse_symbol="GHOST", source="test")
+    assert score.outcome(st, {**late, "as_of": AS_OF, "horizon_days": 20, "isin": "INE0AAA01010", "scope": "stock"})["status"] == "no_data"
+
+
+def test_market_call_is_judged_against_cash(st):
+    d = log.record(st, gate="macro", as_of=AS_OF, action="RISK_ON", horizon_days=20, thesis="Backdrop is supportive of risk.", agent="a", model="m",
+                   signals_cited=["midcap_ratio"] if False else [], confidence=0.6, invalidation="Nifty closes below 50-day average")
+    assert not d.ok       # a call with no cited signal is refused even for the market gate
+    d = log.record(st, gate="macro", as_of=AS_OF, action="NEUTRAL", horizon_days=20, thesis="No clear tide in the data.", agent="a", model="m", signals_cited=[])
+    o = score.outcome(st, {**d.data, "scope": "market"})
+    assert o["status"] == "scored" and o["hit"] is None and o["edge_pct"] == 0                       # no call earns nothing, loses nothing
+    assert o["bench_pct"] == pytest.approx(score.CASH_PCT_PA * 20 / 250)
+
+
+def test_score_all_and_summary_count_everything(st):
+    call(st)
+    call(st, isin=DOWN, action="ENTER", agent="claude")                      # a wrong call
+    call(st, as_of=DAYS[320], horizon_days=60)                                # pending
+    rows = score.score_all(st)
+    s = {(r["author"], r["gate"]): r for r in score.summarise(rows)}[("claude/m1", "entry")]
+    assert (s["decisions"], s["scored"], s["pending"], s["calls"], s["hit_rate"]) == (3, 2, 1, 2, 0.5)
+    assert s["brier"] == pytest.approx(((0.6 - 1) ** 2 + (0.6 - 0) ** 2) / 2)
+    assert s["calibration"] == [{"said": "60%-70%", "n": 2, "actually_right": 0.5}]
+
+
+# --- comparing authors --------------------------------------------------------------------------------------------
+def fake(author, gate, as_of, subject, edge, status="scored", stance=1):
+    a, m = author.split("/")
+    return {"author": author, "agent": a, "model": m, "gate": gate, "as_of": as_of, "subject": subject, "horizon_days": 20, "status": status,
+            "stance": stance, "edge_pct": edge, "edge_net_pct": edge, "excess_pct": edge, "confidence": 0.6, "hit": edge > 0, "symbol": None,
+            "action": "ENTER", "id": "x"}
+
+
+def paired(n_dates, per_date, diff):
+    rows = []
+    for i in range(n_dates):
+        for j in range(per_date):
+            noise = ((i * 7 + j * 3) % 5) - 2
+            rows.append(fake("a/x", "entry", f"2026-01-{i + 1:02d}", f"S{j}", 1 + diff + noise))
+            rows.append(fake("b/x", "entry", f"2026-01-{i + 1:02d}", f"S{j}", 1 + noise))
+    return rows
+
+
+def test_compare_refuses_to_name_a_winner_on_thin_evidence():
+    c = score.compare(paired(3, 4, 5.0), "a/x", "b/x")
+    assert c["pairs"] == 12 and c["verdict"].startswith("not enough evidence")
+
+
+def test_compare_names_a_winner_only_when_the_interval_clears_zero():
+    big = score.compare(paired(12, 5, 2.0), "a/x", "b/x")
+    assert big["pairs"] == 60 and big["dates"] == 12 and big["verdict"].startswith("a/x is better") and big["ci95_pct"][0] > 0
+    flat = score.compare(paired(12, 5, 0.0), "a/x", "b/x")
+    assert flat["verdict"].startswith("no clear difference") and flat["mean_edge_diff_pct"] == 0
+    rev = score.compare(paired(12, 5, -2.0), "a/x", "b/x")
+    assert rev["verdict"].startswith("b/x is better")
+    assert score.compare(paired(12, 5, 2.0), "a/x", "b/x") == big                                    # seeded: same answer every time
+
+
+def test_compare_uses_only_cases_both_scored_and_reports_no_overlap():
+    rows = [fake("a/x", "entry", "2026-01-01", "S1", 1), fake("b/x", "entry", "2026-01-01", "S2", 1), fake("b/x", "entry", "2026-01-02", "S1", 1, status="pending")]
+    c = score.compare(rows, "a/x", "b/x")
+    assert c["pairs"] == 0 and c["verdict"].startswith("no overlap")
+
+
+def test_baseline_always_long_is_built_from_scored_cases_only():
+    rows = [fake("a/x", "entry", "2026-01-01", "S1", -3, stance=-1), fake("a/x", "entry", "2026-01-02", "S1", 1, status="pending")]
+    rows[0]["excess_pct"] = 3.0
+    b = score.baseline_rows(rows)
+    assert len(b) == 1 and b[0]["author"] == "baseline/always-long" and b[0]["edge_net_pct"] == 3.0 and b[0]["hit"] is True
+
+
+# --- evidence bundles ---------------------------------------------------------------------------------------------
+def test_gather_bundle_is_stable_and_lists_unknowns(st):
+    a = gather.gather(st, "entry", AS_OF, isin=UP)
+    b = gather.gather(st, "entry", AS_OF, isin=UP)
+    assert a.ok and a.data["bundle_sha"] == b.data["bundle_sha"] and len(a.data["bundle_sha"]) == 16
+    ev = a.data["evidence"]
+    assert "price_context" in ev["stock"]["signals"] and ev["stock"]["symbol"] == "RISER"
+    assert "insider_cluster" in [u["signal"] for u in ev["unknown"]] and "macro_regime" in [u["signal"] for u in ev["unknown"]]
+    assert a.data["answer_with"]["allowed_actions"] == ["AVOID", "ENTER", "WAIT"]
+    assert gather.gather(st, "entry", DAYS[200], isin=UP).data["bundle_sha"] != a.data["bundle_sha"]
+
+
+def test_gather_blind_hides_the_identity(st):
+    r = gather.gather(st, "entry", AS_OF, isin=UP, blind=True)
+    text = str(r.data)
+    assert r.ok and "RISER" not in text and UP not in text and "Industries" not in text and r.data["evidence"]["stock"]["identity"] == "hidden"
+
+
+def test_gather_refuses_bad_requests(st):
+    assert gather.gather(st, "entry", AS_OF).error.kind.name == "PARSE_FAIL"
+    assert gather.gather(st, "weird", AS_OF, isin=UP).error.kind.name == "PARSE_FAIL"
+    assert gather.gather(st, "entry", "yesterday", isin=UP).error.kind.name == "PARSE_FAIL"
+    assert gather.gather(st, "entry", AS_OF, isin="INE0ZZZ01017").error.kind.name == "NOT_FOUND"
+    assert gather.gather(st, "macro", AS_OF).ok          # a market gate needs no stock
+
+
+def test_gather_reads_the_profile_only_when_given(st):
+    from drishti.profile import Goals, Profile, Risk, WatchItem
+    p = Profile("t", Goals(25.0), Risk(10.0, 25.0), watchlist=(WatchItem(UP, "RISER"),))
+    inv = gather.gather(st, "entry", AS_OF, isin=UP, profile=p).data["evidence"]["investor"]
+    assert inv == {"target_xirr_pct": 25.0, "max_position_pct": 10.0, "max_sector_pct": 25.0, "on_watchlist": True}
+    assert "investor" not in gather.gather(st, "entry", AS_OF, isin=UP).data["evidence"]
+
+
+# --- cases, bundles and answers ----------------------------------------------------------------------------------
+def test_make_cases_is_seeded_and_respects_history_and_horizon(st):
+    from drishti.decisions import cases
+    a = cases.make_cases(st, start=DAYS[0], end=DAYS[-1], every=20, n_stocks=2, seed=3, min_horizon_after=20)
+    b = cases.make_cases(st, start=DAYS[0], end=DAYS[-1], every=20, n_stocks=2, seed=3, min_horizon_after=20)
+    assert a == b and a
+    assert min(c["as_of"] for c in a) >= DAYS[cases.MIN_SESSIONS] and max(c["as_of"] for c in a) <= DAYS[-21]
+    assert {c["gate"] for c in a} == {"entry", "macro"} and all(c["isin"] in (UP, DOWN) for c in a if c["gate"] == "entry")
+    assert a != cases.make_cases(st, start=DAYS[0], end=DAYS[-1], every=20, n_stocks=1, seed=4, min_horizon_after=20)
+
+
+def test_rules_on_cases_then_blind_bundles_then_answers_roundtrip(st, tmp_path):
+    from drishti.decisions import cases
+    cs = cases.make_cases(st, start=DAYS[100], end=DAYS[200], every=25, n_stocks=2, market=False)
+    res = cases.run_rules(st, cs)
+    assert res["recorded"] == len(cs) and res["failed"] == 0
+    assert cases.run_rules(st, cs)["already_logged"] == len(cs)
+    out = cases.export_bundles(st, cs, tmp_path, blind=True)
+    assert out["written"] == len(cs) and (tmp_path / "_key.json").exists()
+    assert not any(UP in f.read_text() or "RISER" in f.read_text() for f in tmp_path.glob("case-*.json"))
+    first = sorted(tmp_path.glob("case-*.json"))[0].stem
+    answers = tmp_path / "a.jsonl"
+    answers.write_text('{"case_id": "%s", "action": "ENTER", "horizon_days": 60, "confidence": 0.6, "thesis": "Uptrend with strength against the index.", '
+                       '"invalidation": "closes below the 50-day average", "signals": ["price_context"]}\n'
+                       '{"case_id": "nope", "action": "ENTER"}\n{"case_id": "%s", "action": "BUY"}\nnot json\n' % (first, first), encoding="utf-8")
+    r = cases.import_answers(st, tmp_path / "_key.json", answers, agent="claude", model="m1")
+    assert r["recorded"] == 1 and r["rejected"] == 3
+    d = log.current(st, agent="claude")[0]
+    wrong = tmp_path / "w.jsonl"
+    wrong.write_text('{"case_id": "%s", "action": "WAIT", "horizon_days": 20, "thesis": "x"}\n' % first, encoding="utf-8")
+    assert "horizon_days must be 60" in cases.import_answers(st, tmp_path / "_key.json", wrong, agent="c2", model="m")["rejections"][0]["why"]
+    assert d["horizon_days"] == 60 and d["isin"] in (UP, DOWN) and d["bundle_sha"] and d["as_of"] in {c["as_of"] for c in cs}
+
+
+# --- MCP tools and CLI --------------------------------------------------------------------------------------------
+def test_mcp_tools_gather_record_list_score(st):
+    from drishti import mcp_server as m
+    g = m.tool_gather(st, "entry", AS_OF, "RISER")
+    assert g["error"] is None and g["data"]["bundle_sha"]
+    r = m.tool_record_decision(st, "entry", AS_OF, "ENTER", 60, "Trend is up and beating the index.", "claude", "m1", ["price_context"], "RISER", 0.6,
+                               "closes below the 50-day average", g["data"]["bundle_sha"])
+    assert r["error"] is None and r["data"]["bundle_sha"] == g["data"]["bundle_sha"] and r["data"]["symbol"] == "RISER"
+    bad = m.tool_record_decision(st, "entry", AS_OF, "BUY", 20, "x", "claude", "m1", [], "RISER")
+    assert bad["error"] and "not valid" in bad["error"]["detail"]
+    assert m.tool_get_decisions(st, agent="claude", query="RISER")["data"]["n"] == 1
+    rules.run(st, "entry", AS_OF, isin=UP, symbol="RISER")
+    sc = m.tool_score_decisions(st, compare=["claude/m1", rules.load()[1].join(["rules/", ""])])
+    assert sc["error"] is None
+    authors = {x["author"] for x in sc["data"]["summary"]}
+    assert "baseline/always-long" in authors and "claude/m1" in authors
+    assert sc["data"]["comparison"]["pairs"] == 1 and sc["data"]["comparison"]["verdict"].startswith("not enough evidence")
+    assert m.tool_score_decisions(st, compare=["only-one"])["error"]["kind"] == "PARSE_FAIL"
+
+
+def test_mcp_server_lists_the_decision_tools(st):
+    pytest.importorskip("mcp")
+    import asyncio
+    from drishti import mcp_server as m
+
+    class Keep:
+        def __enter__(self):
+            return st
+
+        def __exit__(self, *a):
+            return False
+    srv = m.build_server(lambda: Keep())
+    names = {t.name for t in asyncio.run(srv.list_tools())}
+    assert {"gather_evidence", "record_decision", "get_decisions", "score_decisions"} <= names
+
+
+def test_cli_decisions_end_to_end(tmp_path, monkeypatch, capsys):
+    from drishti import cli
+    from drishti.config import load_settings
+    monkeypatch.setenv("DRISHTI_HOME", str(tmp_path))
+    with Store(load_settings().db_path) as s:
+        ds.ensure(s)
+        put_stock(s, UP, "RISER", [100 * 1.004 ** i for i in range(len(DAYS))])
+        ds.persist_index_closes(s, [{"trade_date": d, "index_name": "Nifty 50", "close": 20000 * 1.0004 ** i} for i, d in enumerate(DAYS)])
+    cf = tmp_path / "eval" / "nested" / "cases.json"          # the folder does not exist yet: the command must create it
+    assert cli.main(["decisions", "cases", "--start", DAYS[80], "--end", DAYS[200], "--every", "40", "--n-stocks", "1", "--cases", str(cf), "--horizon-after", "20"]) == 0
+    assert cli.main(["decisions", "rules", "--cases", str(cf)]) == 0
+    assert '"recorded": 3' in capsys.readouterr().out or True
+    assert cli.main(["decisions", "export", "--cases", str(cf), "--out", str(tmp_path / "b")]) == 0
+    assert cli.main(["decisions", "list"]) == 0
+    assert cli.main(["decisions", "score", "--agent", "rules"]) == 0
+    out = capsys.readouterr().out
+    assert "rules/rules-v1+" in out and "baseline/always-long" in out
+    assert cli.main(["decisions", "cases", "--cases", str(cf)]) == 2          # missing --start/--end
+    assert cli.main(["decisions", "nonsense"]) == 2

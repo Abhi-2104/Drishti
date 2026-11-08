@@ -44,3 +44,7 @@ This registration edits a file outside the project, so it is done by you, not by
 Write a plain function of a `Store` in `drishti/mcp_server.py` that returns `Result.to_dict()`, test it without the SDK,
 then register it in `build_server`. Tools stay profile-neutral; anything that needs a portfolio goes through the
 profile layer, which only decisions and tools may read.
+
+## Decision tools (see docs/DECISIONS.md)
+`gather_evidence` (evidence bundle for a gate and date, with hash), `record_decision` (append one call to the log),
+`get_decisions` (the log), `score_decisions` (how calls turned out vs the Nifty / cash, per author, with an optional paired comparison).

@@ -46,6 +46,24 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare")
+    dc.add_argument("what")
+    dc.add_argument("--gate", default=None)
+    dc.add_argument("--start", default=None)
+    dc.add_argument("--end", default=None)
+    dc.add_argument("--every", type=int, default=10, help="cases: take every Nth stored session")
+    dc.add_argument("--n-stocks", type=int, default=10, help="cases: stocks drawn per date")
+    dc.add_argument("--seed", type=int, default=11)
+    dc.add_argument("--horizon-after", type=int, default=60, help="cases: sessions that must exist after the date so the call can be scored")
+    dc.add_argument("--cases", default=None, help="case file (JSON) written by `cases`")
+    dc.add_argument("--out", default=None, help="export: folder for evidence bundles")
+    dc.add_argument("--no-blind", action="store_true", help="export: keep the stock's name and symbol in the bundles")
+    dc.add_argument("--key", default=None, help="import: _key.json written by export")
+    dc.add_argument("--answers", default=None, help="import: JSON-lines answers file")
+    dc.add_argument("--agent", default=None)
+    dc.add_argument("--model", default=None)
+    dc.add_argument("--a", default=None, help="compare: first author, agent/model")
+    dc.add_argument("--b", default=None, help="compare: second author, agent/model")
     sub.add_parser("init", help="create the settings/profile templates (never overwrites)")
     sub.add_parser("paths", help="show where settings, profile and the database live")
     args = ap.parse_args(argv)
@@ -117,6 +135,15 @@ def main(argv: list[str] | None = None) -> int:
             out["data"]["documents"] = {k: v[:4] for k, v in r.data.get("documents", {}).items()}
         print(_json.dumps(out, indent=1, default=str)[:6000])
         return 0 if r.ok else 1
+    if args.cmd == "decisions":
+        from .store import Store
+        try:
+            cfg = load_settings()
+        except ConfigError as e:
+            print(f"drishti decisions: {e}", file=sys.stderr)
+            return 2
+        with Store(cfg.db_path) as st:
+            return _decisions(st, args, cfg)
     if args.cmd in ("backfill", "signal"):
         from .store import Store
         try:
@@ -155,6 +182,72 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{rep.job}: {sum(s.ok for s in rep.steps)}/{len(rep.steps)} steps ok")
         return 0 if rep.ok else 1
     return _todo(args.cmd)
+
+
+def _decisions(st, args, cfg) -> int:
+    """`drishti decisions ...`: build cases, run the rule baseline, export blind evidence for agents, take their answers back, score, compare."""
+    import json as _json
+    from pathlib import Path
+    from .decisions import cases as cs, log, score
+    w = args.what
+
+    def need(**kw):
+        miss = [f"--{k.replace('_', '-')}" for k, v in kw.items() if not v]
+        if miss:
+            print(f"drishti decisions {w}: needs {', '.join(miss)}", file=sys.stderr)
+        return not miss
+    if w == "cases":
+        if not need(start=args.start, end=args.end, cases=args.cases):
+            return 2
+        gates = tuple(args.gate.split(",")) if args.gate else ("entry",)
+        cases = cs.make_cases(st, start=args.start, end=args.end, every=args.every, n_stocks=args.n_stocks, seed=args.seed, stock_gates=tuple(g for g in gates if g != "macro"),
+                              market="macro" in gates or not args.gate, min_horizon_after=args.horizon_after)
+        cs.save(cases, Path(args.cases), {"start": args.start, "end": args.end, "every": args.every, "n_stocks": args.n_stocks, "seed": args.seed,
+                                          "gates": gates, "horizon_after": args.horizon_after})
+        dates = sorted({c["as_of"] for c in cases})
+        print(f"{len(cases)} cases on {len(dates)} dates ({dates[0] if dates else '-'} .. {dates[-1] if dates else '-'}) -> {args.cases}")
+        return 0 if cases else 1
+    if w in ("rules", "export"):
+        if not need(cases=args.cases):
+            return 2
+        cases, _ = cs.load(Path(args.cases))
+        if w == "rules":
+            print(_json.dumps(cs.run_rules(st, cases), indent=1))
+            return 0
+        if not need(out=args.out):
+            return 2
+        prof = None
+        try:
+            from .profile import load_profile
+            prof = load_profile(cfg)
+        except Exception:
+            prof = None
+        r = cs.export_bundles(st, cases, Path(args.out), blind=not args.no_blind, profile=prof)
+        print(_json.dumps(r, indent=1))
+        return 0 if r["written"] else 1
+    if w == "import":
+        if not need(key=args.key, answers=args.answers, agent=args.agent, model=args.model):
+            return 2
+        r = cs.import_answers(st, Path(args.key), Path(args.answers), agent=args.agent, model=args.model)
+        print(_json.dumps(r, indent=1))
+        return 0 if r["recorded"] and not r["rejected"] else 1
+    if w == "list":
+        for d in log.current(st, gate=args.gate, agent=args.agent, model=args.model, since=args.start, until=args.end, limit=60):
+            print(f"{d['as_of']} {d['gate']:<6s} {d['symbol'] or 'MARKET':<12s} {d['action']:<9s} {d['horizon_days']:>3d}d conf {d['confidence'] if d['confidence'] is not None else '-':<5} {d['agent']}/{d['model']}")
+        return 0
+    if w in ("score", "compare"):
+        rows = score.score_all(st, gate=args.gate, agent=args.agent, model=args.model, since=args.start, until=args.end)
+        rows = rows + score.baseline_rows(rows)
+        if w == "score":
+            for s_ in score.summarise(rows):
+                print(_json.dumps(s_))
+            return 0
+        if not need(a=args.a, b=args.b):
+            return 2
+        print(_json.dumps(score.compare(rows, args.a, args.b, gate=args.gate), indent=1))
+        return 0
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare", file=sys.stderr)
+    return 2
 
 
 def _backfill(st, args) -> int:

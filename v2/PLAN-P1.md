@@ -114,3 +114,4 @@ Seasonality and cycle phase (P2); `/macro` synthesis and signal scoring math (P2
 - Market-hours test of Yahoo `RELIANCE.NS` (still pending as of 7 Nov 2026).
 - Which machine stays on in the evenings to run the worker.
 - Which recurring narrative runs are wanted, and on which engine.
+- **Parked (8 Nov 2026, by the user): registering the scheduled jobs** (`scripts/register-tasks.ps1`, which machine runs them). Do this LAST, once the whole tool (decision layer, date-locked mode, scorer, harness) is built and tested. Until then jobs are run by hand with `drishti run <job>`.

@@ -1,0 +1,44 @@
+# rules-v1: the plain rule-based baseline for the decision gates. FROZEN before any scoring run: change a number only by
+# raising `version`, never to improve a past result. The rule engine reads the same stored signals an agent is given.
+version = "1"
+
+[data]
+min_sessions = 60         # fewer stored sessions than this: no call at all (a skipped case, never a guessed WAIT)
+
+[stock_points]            # points added for each reading; an unreadable input adds 0 and is listed as unknown
+trend_up = 2              # close > 50-day > 200-day average
+trend_down = -2           # close < 50-day < 200-day average
+trend_weak_up = 1         # fewer than 200 sessions stored: above the 50-day average and up over 3 months
+trend_weak_down = -1
+rel_strength_pos = 1      # beating the Nifty over ~3 months
+rel_strength_neg = -1
+insider_buy = 1           # insider buying cluster or size buying
+insider_sell = -1         # insider selling cluster
+macro_bull = 1            # macro_regime score >= macro_bull_at
+macro_bear = -1           # macro_regime score <= macro_bear_at
+macro_bull_at = 2
+macro_bear_at = -2
+chasing = -1              # 1-month return above chasing_above_pct (late buyer)
+chasing_above_pct = 25.0
+
+[entry]
+enter_at = 3              # total points to ENTER
+avoid_at = -2             # total points (or a strong-caution pledge) to AVOID; otherwise WAIT
+horizon_days = 60
+
+[exit]
+exit_at = -4              # total points to EXIT
+trim_at = -2              # total points to TRIM; otherwise HOLD
+horizon_days = 60
+
+[confidence]              # probability the call is right = base + per_point * |points|, capped
+base = 0.55
+per_point = 0.03
+cap = 0.70
+
+[macro]
+on_at = 2                 # net votes for RISK_ON
+off_at = -2               # net votes for RISK_OFF
+min_inputs = 3            # fewer readable votes than this: NEUTRAL (no call)
+participant_strong = 4    # participant_oi score at or beyond +/- this counts as a vote
+horizon_days = 60
