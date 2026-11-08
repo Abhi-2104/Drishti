@@ -26,7 +26,7 @@ from drishti.providers.profiles import NSE_ARCHIVE
 from drishti.store import Store
 
 OUT = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "_raw" / "validate_live.json"
-GROUPS = ("archive", "bse", "pit", "shp", "macro", "master", "corp", "quotes", "samples", "batch3", "adjust", "market", "us")
+GROUPS = ("archive", "bse", "pit", "shp", "macro", "master", "corp", "quotes", "samples", "batch3", "adjust", "batch5", "market", "us")
 
 
 def line(ok: bool, name: str, secs: float, detail: str) -> None:
@@ -352,27 +352,52 @@ def group_us(report: list, store: Store) -> None:
                    f"{sorted(r.data['holdings'], key=lambda h: -h['value_usd'])[0]['issuer']}")
 
 
+def group_batch5(report: list, store: Store) -> None:
+    """India macro (MoSPI), delivery %, BSE scrip list. IIP and RBI reserves are expected to report STALE/EMPTY today: that is the
+    feed's truth and counts as a pass when the typed error names the newest month."""
+    from drishti.providers import bse, mospi, nse_archive
+    from drishti.providers import _util as pu
+    for k in ("cpi", "wpi"):
+        show(report, f"mospi_{k}", lambda k=k: getattr(mospi, k)(),
+             lambda r: f"{r.data['latest']} as of {r.as_of}")
+    for k in ("iip", "rbi_reserves"):
+        r, secs = timed(lambda k=k: getattr(mospi, k)())
+        stale = (not r.ok) and getattr(r.error.kind, "value", r.error.kind) == "STALE" and "20" in r.error.detail
+        line(r.ok or stale, f"mospi_{k}", secs, (f"{r.data['latest']} as of {r.as_of}" if r.ok else f"{r.error.kind}: {r.error.detail[:150]} (expected while the feed is behind)"))
+        report.append({"name": f"mospi_{k}", "ok": r.ok or stale, "as_of": r.as_of, "secs": round(secs, 2),
+                       "error": None if r.ok else {"kind": str(r.error.kind), "detail": r.error.detail}})
+    show(report, "delivery_latest", lambda: pu.latest(lambda d: nse_archive.delivery(d), today_ist(), sessions=None),
+         lambda r: f"{len(r.data)} rows for {r.as_of}; RELIANCE {[x['deliv_per'] for x in r.data if x['symbol'] == 'RELIANCE']}")
+    show(report, "bse_scrip_list", lambda: bse.scrip_list(), lambda r: f"{len(r.data)} active scrips")
+
+
 def group_adjust(report: list, store: Store) -> None:
-    """Split / bonus / rights adjustments found in YOUR stored price history (read-only use of the real store, except
-    that it rewrites the price_adjustment table, which is derived). Prints the events so they can be eyeballed."""
+    """Split / bonus events rebuilt from YOUR stored prices and corporate actions (read-only except that it rewrites the derived
+    price_adjustment / isin_succession tables). Passes when most stored actions are confirmed by the price step."""
     from drishti.config import load_settings
     from drishti.store import datasets as ds
     with Store(load_settings().db_path) as real:
         t0 = time.time()
         r = ds.rebuild_adjustments(real)
-        ok = not r["gap_days"]
-        line(ok, "price_adjustments", time.time() - t0, f"{r['events']} events, {r['labelled']} labelled from corporate actions, "
-                                                        f"{len(r['gap_days'])} missing-session days skipped")
-        report.append({"name": "price_adjustments", "ok": ok, "events": r["events"], "gap_days": r["gap_days"]})
-        for g in r["gap_days"][:5]:
-            print(f"     gap: {g}")
-        ev = real.query("SELECT a.*, p.symbol FROM price_adjustment a LEFT JOIN price_eod p ON p.isin=a.isin AND p.trade_date=a.ex_date "
-                        "AND p.exchange=a.exchange AND p.series=a.series ORDER BY ex_date DESC LIMIT 15")
+        total = r["events"] + len(r["unverified"]) + len(r["unparsed"])
+        share = r["events"] / total if total else 0.0
+        ok = r["events"] > 0 and share >= 0.6
+        line(ok, "price_adjustments", time.time() - t0,
+             f"{r['events']} verified of {total} split/bonus actions with a stored ex-date session ({share:.0%}); {len(r['unverified'])} not confirmed, "
+             f"{len(r['unparsed'])} unreadable; {r['successions']} ISIN successions")
+        report.append({"name": "price_adjustments", "ok": ok, "events": r["events"], "unverified": len(r["unverified"]), "unparsed": len(r["unparsed"]),
+                       "successions": r["successions"]})
+        ev = real.query("SELECT * FROM price_adjustment WHERE verified = 1 ORDER BY ex_date DESC LIMIT 12")
         for e in ev:
-            print(f"     {e['ex_date']} {e['symbol'] or e['isin']:<14s} {e['exchange']} x{e['factor']:<9g} last {e['last_close']} -> prev {e['prev_close']}"
-                  f"  {e['kind'] or '(no stored action)'} {(e['subject'] or '')[:60]}")
-        kinds = real.query("SELECT COALESCE(kind, 'unlabelled') AS k, COUNT(*) AS n FROM price_adjustment GROUP BY 1")
-        print("     by kind: " + ", ".join(f"{k['k']}: {k['n']}" for k in kinds))
+            print(f"     ok   {e['ex_date']} {e['symbol']:<12s} {e['kind']:<6s} x{e['factor']:<8g} observed {e['observed_ratio']:<8g} "
+                  f"{e['isin']}{' -> ' + e['new_isin'] if e['new_isin'] else ''}")
+        for x in sorted(r["unverified"], key=lambda x: x["ex_date"], reverse=True)[:12]:
+            print(f"     NOT CONFIRMED {x['ex_date']} {x['symbol']:<12s} {x['kind']:<6s} {x['reason']}")
+        for x in r["unparsed"][:8]:
+            print(f"     UNREADABLE {x['ex_date']} {x['symbol']:<12s} {x['subject'][:80]}")
+        for sym in ("KMEW", "GNRL", "JSWDULUX", "AZADIND", "CONCORDBIO"):      # the cases seen by hand on 8 Nov 2026
+            row = real.query("SELECT verified, factor, observed_ratio FROM price_adjustment WHERE symbol = ? ORDER BY ex_date DESC LIMIT 1", (sym,))
+            print(f"     known case {sym:<11s} " + (f"verified={row[0]['verified']} factor={row[0]['factor']} observed={row[0]['observed_ratio']}" if row else "no event row"))
 
 
 def group_samples(report: list, store: Store) -> None:
@@ -449,7 +474,7 @@ def main(argv=None) -> int:
         for g in args.only or GROUPS:
             print(f"== {g}")
             {"archive": lambda: group_archive(report, store), "bse": lambda: group_bse(report, store),
-             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "master": lambda: group_master(report, store), "corp": lambda: group_corp(report, store), "quotes": lambda: group_quotes(report, store), "samples": lambda: group_samples(report, store), "batch3": lambda: group_batch3(report, store), "adjust": lambda: group_adjust(report, store), "market": lambda: group_market(report, store), "us": lambda: group_us(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
+             "pit": lambda: group_pit(report, store), "macro": lambda: group_macro(report, store), "master": lambda: group_master(report, store), "corp": lambda: group_corp(report, store), "quotes": lambda: group_quotes(report, store), "samples": lambda: group_samples(report, store), "batch3": lambda: group_batch3(report, store), "adjust": lambda: group_adjust(report, store), "batch5": lambda: group_batch5(report, store), "market": lambda: group_market(report, store), "us": lambda: group_us(report, store), "shp": lambda: group_shp(report, store, args.shp_sample)}[g]()
             print()
         bad = [r["name"] for r in report if not r["ok"]]
         print(f"{len(report) - len(bad)} ok, {len(bad)} failed" + (f": {', '.join(bad)}" if bad else ""))

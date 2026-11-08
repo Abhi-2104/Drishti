@@ -7,10 +7,10 @@ copy is older than 7 days); each says so in its `sources`.
 | Group | Tools |
 |---|---|
 | Health and lookup | `data_health` (start here), `resolve_security` (ambiguous matches are returned as such, never guessed) |
-| Macro and market regime | `get_macro_regime`, `get_cycle_phase`, `get_seasonality`, `get_liquidity`, `get_credit_spreads`, `get_midcap_ratio`, `get_sector_rotation` |
+| Macro and market regime | `get_macro_regime`, `get_cycle_phase`, `get_seasonality`, `get_liquidity`, `get_credit_spreads`, `get_midcap_ratio`, `get_sector_rotation`, `get_india_macro` (CPI, WPI, IIP, RBI reserves: reading, month, age, stale flag) |
 | Flows and derivatives | `get_fii_dii` (NSE provisional), `get_fpi_flows` (NSDL confirmed, a day later), `get_participant_oi`, `get_options_flow`, `get_option_chain` |
 | Disclosures | `insider_trades`, `get_insider_cluster`, `get_pledge`, `screen_disclosures` |
-| One company | `get_fundamentals`, `get_quote`, `get_price_context`, `get_announcements`, `get_corporate_actions`, `get_credit_ratings`, `get_deals` |
+| One company | `get_fundamentals`, `get_quote`, `get_price_context`, `get_announcements`, `get_corporate_actions`, `get_credit_ratings`, `get_deals`, `get_delivery` (delivery % per session) |
 | Calendar | `get_calendar` (board meetings / results dates, NSE + BSE), `get_market_today` (Gift Nifty, IPOs, expiries, holidays) |
 
 Signals accept `as_of` (YYYY-MM-DD) and then read only data up to that date.

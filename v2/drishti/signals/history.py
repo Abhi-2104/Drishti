@@ -53,6 +53,16 @@ def macro_points(store, series: str, on=None, n: int = 2) -> list[tuple[str, flo
     return [(r["obs_date"], r["value"]) for r in rows]
 
 
+def macro_released(store, series: str, on=None, lag_days: int = 0, n: int = 2) -> list[tuple[str, float]]:
+    """Newest-first last n observations of a monthly series that were PUBLISHED by `on`: reference-month end + `lag_days` <= on.
+    A September CPI dated 30 Sep is not known on 30 Sep; this is what keeps date-locked runs honest."""
+    if not _exists(store, "macro_series"):
+        return []
+    rows = store.query("SELECT obs_date, value FROM macro_series WHERE series=? AND date(obs_date, ?) <= ? ORDER BY obs_date DESC LIMIT ?",
+                       (series, f"+{int(lag_days)} day", _d(on), n))
+    return [(r["obs_date"], r["value"]) for r in rows]
+
+
 def macro_on_or_before(store, series: str, day: str) -> tuple[str, float] | None:
     p = macro_points(store, series, day, 1)
     return p[0] if p else None

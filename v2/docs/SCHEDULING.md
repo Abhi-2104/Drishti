@@ -41,6 +41,7 @@ directory with `StartCalendarInterval` Hour 18 / Minute 45, then `launchctl load
 | `signals_daily` | daily 21:45 | after the evening data is in |
 | `premarket` | daily 08:45, every 30 min for 1 h | Gift Nifty, NSDL confirmed FPI flows |
 | `macro_daily` | daily 07:15 | Yahoo and FRED daily series |
+| `macro_india` | daily 18:10 | MoSPI CPI (about the 12th), WPI (14th), IIP (28th), RBI reserves; a series past its window is reported STALE |
 | `insider` | daily 07:30 and 20:30 | filings arrive through the evening; only new ones are downloaded |
 | `shp_master` | daily 07:45 | filings arrive around quarter-end |
 | `calendars` | Mon 07:00 | holidays (incl. special sessions) and expiry dates |

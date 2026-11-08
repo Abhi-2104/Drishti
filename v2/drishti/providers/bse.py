@@ -155,7 +155,53 @@ def corporate_actions(*, back_days: int = 7, ahead_days: int = 30, today: date |
                                       to=(today + timedelta(days=ahead_days)).strftime("%Y%m%d")), BSE_API, expect="json")
     rows = parse_corporate_actions(got.body)
     u.require_rows(rows, "bse_corporate_actions")
-    return Result(data=rows, as_of=today.isoformat(), sources=[got.source(SOURCE)])
+    frm, to = (today - timedelta(days=back_days)).isoformat(), (today + timedelta(days=ahead_days)).isoformat()
+    inside = [r for r in rows if r["ex_date"] and frm <= r["ex_date"] <= to]
+    if not inside:      # seen 8 Nov 2026: past windows all came back with the same upcoming list, i.e. the date range is ignored
+        dates = sorted(r["ex_date"] for r in rows if r["ex_date"])
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"bse_corporate_actions: {len(rows)} rows with ex-dates {dates[0] if dates else '-'}.."
+                                                  f"{dates[-1] if dates else '-'}, none inside the requested {frm}..{to}: the endpoint ignores its date range")
+    return Result(data=inside, as_of=today.isoformat(), sources=[got.source(SOURCE)])
+
+
+SCRIP_LIST_URL = ("https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active")
+MIN_SCRIPS = 3000      # 5,146 active equity scrips on 2026-11-08
+
+
+def parse_scrip_list(body: bytes, *, min_rows: int = MIN_SCRIPS) -> list[dict]:
+    """Every active BSE equity scrip with its ISIN: maps the scrip codes the (traded-today-only) bhavcopy never shows."""
+    import json
+    label = "bse_scrip_list"
+    try:
+        doc = json.loads(u.decode(body))
+    except ValueError:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: not JSON (first bytes {body[:60]!r})") from None
+    if not isinstance(doc, list):
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: expected a list, got {type(doc).__name__}")
+    out, seen = [], set()
+    for r in doc:
+        for k in ("SCRIP_CD", "Scrip_Name", "Status", "GROUP", "ISIN_NUMBER", "scrip_id"):
+            if k not in r:
+                raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: row lacks {k}; layout changed? {str(r)[:120]}")
+        code = str(r["SCRIP_CD"]).strip()
+        if not code.isdigit():
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: scrip code {code!r} is not numeric")
+        if code in seen:
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: scrip code {code} appears twice")
+        seen.add(code)
+        out.append({"scrip_code": code, "name": u.opt_str(r["Scrip_Name"]), "status": u.opt_str(r["Status"]), "group": u.opt_str(r["GROUP"]),
+                    "isin": u.opt_str(r["ISIN_NUMBER"]), "symbol": u.opt_str(r["scrip_id"]), "face_value": u.num(r.get("FACE_VALUE"), f"{label}.face_value"),
+                    "issuer": u.opt_str(r.get("Issuer_Name")), "mktcap": u.num(r.get("Mktcap"), f"{label}.mktcap")})
+    u.require_rows(out, label, min_rows)
+    return out
+
+
+@guard
+def scrip_list() -> Result:
+    got = get(SCRIP_LIST_URL, BSE_API, expect="json")
+    rows = parse_scrip_list(got.body)
+    from ..core.canary import today_ist
+    return Result(data=rows, as_of=today_ist().isoformat(), sources=[got.source(SOURCE)])
 
 
 def parse_result_calendar(body: bytes) -> list[dict]:

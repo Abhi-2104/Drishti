@@ -61,7 +61,7 @@ def parse_equity_l(body: bytes, *, min_rows: int = MIN_EQUITY_L) -> list[dict]:
     return out
 
 
-def merge_master(equity_l: list[dict], bse_rows: list[dict], nse_cm: list[dict] = ()) -> dict:
+def merge_master(equity_l: list[dict], bse_rows: list[dict], nse_cm: list[dict] = (), bse_scrips: list[dict] = ()) -> dict:
     """Join the three listings on ISIN. Nothing is dropped silently: skipped / rejected / conflicting rows are reported."""
     sec: dict[str, dict] = {}
     rejected, conflicts, skipped = [], [], Counter()
@@ -88,6 +88,22 @@ def merge_master(equity_l: list[dict], bse_rows: list[dict], nse_cm: list[dict] 
             conflicts.append({"isin": isin, "kept": s["bse_scrip"], "ignored": r["scrip_code"]})
             continue
         s.update(bse_scrip=r["scrip_code"], bse_symbol=r["symbol"].strip().upper(), bse_series=r["series"])
+    for r in sorted(bse_scrips, key=lambda x: x["scrip_code"]):    # the full BSE list: scrips the bhavcopy did not show that day
+        isin = normalize_isin(r.get("isin"))
+        if not is_valid_isin(isin):
+            rejected.append({"source": "bse_scrips", "symbol": r["symbol"], "scrip": r["scrip_code"], "isin": r.get("isin")})
+            continue
+        cls = instrument_class(isin)
+        if isin not in sec and cls not in KEEP_FROM_BSE:
+            skipped[cls] += 1
+            continue
+        s = sec.setdefault(isin, {"isin": isin, "name": r["name"], "instrument_class": cls, "nse_symbol": None, "nse_series": None,
+                                  "nse_listed_on": None, "bse_scrip": None, "bse_symbol": None, "bse_series": None})
+        if s["bse_scrip"] and s["bse_scrip"] != r["scrip_code"]:
+            conflicts.append({"isin": isin, "kept": s["bse_scrip"], "ignored": r["scrip_code"]})
+            continue
+        s.update(bse_scrip=r["scrip_code"], bse_symbol=s["bse_symbol"] or (r["symbol"] or "").strip().upper() or None,
+                 bse_series=s["bse_series"] or r["group"])
     for s in sec.values():
         s["listing"] = "both" if s["nse_symbol"] and s["bse_scrip"] else "nse" if s["nse_symbol"] else "bse"
     rows = sorted(sec.values(), key=lambda s: s["isin"])
@@ -127,7 +143,10 @@ def build_security_master(store, *, today: date | None = None, min_equity_rows: 
     nse = u.latest(lambda d: nse_archive.cm_bhavcopy(d, store=store), today)
     if not nse.ok:
         warnings.append(f"NSE cash bhavcopy unavailable ({nse.error.kind}): ETFs traded on NSE are not added this run")
-    merged = merge_master(eq.data, bs.data, nse.data if nse.ok else [])
+    sl = bse.scrip_list()
+    if not sl.ok:
+        warnings.append(f"BSE scrip list unavailable ({sl.error.kind}: {sl.error.detail[:80]}): BSE codes of scrips that did not trade today are not added")
+    merged = merge_master(eq.data, bs.data, nse.data if nse.ok else [], sl.data if sl.ok else [])
     st = merged["stats"]
     if st["overlap"] < MIN_OVERLAP:
         raise DrishtiError(ErrorKind.PARSE_FAIL, f"security_master: only {st['overlap']:.0%} of NSE equities appear in the BSE file (need {MIN_OVERLAP:.0%}); ISIN join broken?")

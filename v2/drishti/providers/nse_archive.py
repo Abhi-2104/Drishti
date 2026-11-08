@@ -24,6 +24,8 @@ BAN_URL = "https://nsearchives.nseindia.com/archives/fo/sec_ban/fo_secban_{dmy}.
 MIN_CM_ROWS = 1500    # 3,715 on 2026-11-06; far fewer means a truncated file
 MIN_FO_ROWS = 5000    # 40,471 on 2026-11-06
 MIN_INDEX_ROWS = 50   # 167 on 2026-11-06
+MIN_DELIVERY_ROWS = 1500    # 3,559 on 2026-11-06
+DELIVERY_URL = "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{dmy}.csv"
 
 
 # --- parsers (pure) ---------------------------------------------------------------------------------
@@ -196,6 +198,36 @@ def parse_block_deals(body: bytes) -> list[dict]:
     return _parse_deals(body, "block_deals")
 
 
+def parse_delivery(body: bytes, *, min_rows: int = MIN_DELIVERY_ROWS) -> list[dict]:
+    """sec_bhavdata_full: one row per (symbol, series) with traded and delivered quantity. Trade-for-trade series (BE, BZ...) carry
+    '-' for delivery: those rows are kept with delivery None (a real "not applicable", not a blank)."""
+    label = "delivery"
+    need = ["SYMBOL", "SERIES", "DATE1", "TTL_TRD_QNTY", "NO_OF_TRADES", "DELIV_QTY", "DELIV_PER"]
+    out, seen, dates = [], set(), set()
+    for r in u.csv_rows(u.decode(body), need, label):
+        r = {k: (v or "").strip() for k, v in r.items()}
+        sym, series = r["SYMBOL"].upper(), r["SERIES"].upper()
+        if (sym, series) in seen:
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: {sym}/{series} appears twice")
+        seen.add((sym, series))
+        day = u.iso_date(r["DATE1"], f"{label}.DATE1")
+        dates.add(day)
+        ttl, dq, dp = u.num(r["TTL_TRD_QNTY"], f"{label}.qty"), u.num(r["DELIV_QTY"], f"{label}.deliv_qty"), u.num(r["DELIV_PER"], f"{label}.deliv_per")
+        if (dq is None) != (dp is None):
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: {sym}/{series} has only one of delivery quantity and percentage")
+        if dq is not None and (dq > ttl or not 0 <= dp <= 100.0001):
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: {sym}/{series} delivery {dq} ({dp}%) is impossible for {ttl} traded")
+        out.append({"trade_date": day, "symbol": sym, "series": series, "ttl_qty": int(ttl or 0), "deliv_qty": None if dq is None else int(dq),
+                    "deliv_per": dp, "trades": int(u.num(r["NO_OF_TRADES"], f"{label}.trades") or 0)})
+    u.require_rows(out, label, min_rows)
+    if len(dates) != 1:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: file mixes dates {sorted(dates)[:3]}")
+    eq = [x for x in out if x["series"] == "EQ"]
+    if eq and sum(1 for x in eq if x["deliv_per"] is not None) < 0.9 * len(eq):
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: delivery missing for most EQ rows; column changed?")
+    return out
+
+
 # --- public provider functions (fetch + parse + date check) -----------------------------------------
 def _ymd(d: date) -> str:
     return d.strftime("%Y%m%d")
@@ -224,6 +256,12 @@ def cm_bhavcopy(d: date, *, store=None) -> Result:
 @guard
 def fo_bhavcopy(d: date, *, store=None) -> Result:
     return _daily("fo_bhavcopy", d, f"{ARCH}/fo/BhavCopy_NSE_FO_0_0_0_{_ymd(d)}_F_0000.csv.zip", "zip", parse_fo_bhavcopy, store)
+
+
+@guard
+def delivery(d: date, *, store=None) -> Result:
+    """Delivered quantity and percentage per stock for one session (published in the evening, after the bhavcopy)."""
+    return _daily("delivery", d, DELIVERY_URL.format(dmy=_dmy(d)), "csv", parse_delivery, store)
 
 
 @guard

@@ -14,7 +14,10 @@ def _bars(store, isin: str, on, days: int = 400) -> list[dict]:
         return []
     end = h._d(on)
     start = (date.fromisoformat(end) - timedelta(days=days)).isoformat()
-    rows = store.query("SELECT * FROM price_eod WHERE isin=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date, exchange", (isin, start, end))
+    from ..store import datasets as ds
+    chain = ds.isin_chain(store, isin)         # a face-value split gives the stock a new ISIN: the history spans both
+    rows = store.query(f"SELECT * FROM price_eod WHERE isin IN ({','.join('?' * len(chain))}) AND trade_date BETWEEN ? AND ? ORDER BY trade_date, exchange",
+                       tuple(chain) + (start, end))
     by: dict[str, dict] = {}
     for r in rows:                     # one bar per day: NSE if present (EQ preferred), else BSE
         cur = by.get(r["trade_date"])
@@ -25,15 +28,16 @@ def _bars(store, isin: str, on, days: int = 400) -> list[dict]:
 
 
 def adjust(bars: list[dict], events: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Bars with every split / bonus / rights adjustment applied backwards (prices x factor, volume / factor), so a
-    1:10 split is not read as a 90% fall. Only events for the exchange and series a bar is on are applied to it."""
+    """Bars with every verified split / bonus adjustment applied backwards (prices x factor, volume / factor), so a 1:10
+    split is not read as a 90% fall. A split affects every venue and series of the security, so an event applies to all
+    bars before its ex-date (the bars passed in are already one security's chain of ISINs)."""
     if not events:
         return bars, []
     out, used = [], []
     for b in bars:
         f = 1.0
         for e in events:
-            if e["ex_date"] > b["trade_date"] and e["exchange"] == b["exchange"] and e["series"] == b["series"]:
+            if e["ex_date"] > b["trade_date"]:
                 f *= e["factor"]
         if f != 1.0:
             b = {**b, **{k: (b[k] * f if b[k] is not None else None) for k in ("open", "high", "low", "close")},
@@ -99,8 +103,9 @@ def price_context(store, isin: str, on=None):
         comps.append(Component("adjusted for", [f"{e['ex_date']} {e['kind'] or 'adjustment'} x{e['factor']:g}" for e in used], d0,
                                "earlier prices scaled so returns and averages span the event"))
     return ok(Signal("price_context", d0, None, trend, comps, missing,
-                     "From exchange bhavcopy closes (NSE primary, BSE for BSE-only names), adjusted for splits, bonuses and rights "
-                     "using the exchange's own adjusted previous close. Not adjusted for dividends (price return, not total return).",
+                     "From exchange bhavcopy closes (NSE primary, BSE for BSE-only names), adjusted for splits and bonuses "
+                     "using the corporate action's terms, applied only where the stored prices show the step. Rights issues and dividends are not "
+                     "adjusted (price return, not total return).",
                      "price",
                      details={"isin": isin, "close": c, "atr14": a, "dma": {"20": d20, "50": d50, "200": d200}, "high_52w": hi,
                               "low_52w": lo, "sessions": len(bars), "exchange": last["exchange"],

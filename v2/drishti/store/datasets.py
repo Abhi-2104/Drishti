@@ -5,6 +5,8 @@ indexed for fast history queries. Every write is an idempotent upsert, so re-run
 """
 from __future__ import annotations
 
+import math
+import re
 from datetime import date
 from typing import Iterable
 
@@ -16,7 +18,8 @@ CREATE TABLE IF NOT EXISTS price_eod (
     trade_date TEXT NOT NULL, isin TEXT NOT NULL, exchange TEXT NOT NULL, series TEXT NOT NULL, symbol TEXT,
     open REAL, high REAL, low REAL, close REAL NOT NULL, prev_close REAL, volume INTEGER, turnover REAL, trades INTEGER,
     PRIMARY KEY (trade_date, isin, exchange, series));
-CREATE INDEX IF NOT EXISTS ix_price_isin ON price_eod (isin, trade_date)""",
+CREATE INDEX IF NOT EXISTS ix_price_isin ON price_eod (isin, trade_date);
+CREATE INDEX IF NOT EXISTS ix_price_sym ON price_eod (exchange, symbol, trade_date)""",
     "deal": """
 CREATE TABLE IF NOT EXISTS deal (
     kind TEXT NOT NULL, trade_date TEXT NOT NULL, symbol TEXT NOT NULL, client TEXT NOT NULL, side TEXT NOT NULL, qty INTEGER NOT NULL,
@@ -53,9 +56,20 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     PRIMARY KEY (isin, latest_quarter))""",
     "price_adjustment": """
 CREATE TABLE IF NOT EXISTS price_adjustment (
-    isin TEXT NOT NULL, exchange TEXT NOT NULL, series TEXT NOT NULL, ex_date TEXT NOT NULL, factor REAL NOT NULL,
-    prev_close REAL, last_close REAL, last_date TEXT, kind TEXT, subject TEXT, PRIMARY KEY (isin, exchange, series, ex_date));
+    exchange TEXT NOT NULL, symbol TEXT NOT NULL, ex_date TEXT NOT NULL, kind TEXT NOT NULL, isin TEXT, new_isin TEXT,
+    factor REAL, expected_factor REAL, observed_ratio REAL, verified INTEGER NOT NULL, reason TEXT, subject TEXT,
+    last_close REAL, last_date TEXT, ex_close REAL, PRIMARY KEY (exchange, symbol, ex_date, kind));
 CREATE INDEX IF NOT EXISTS ix_price_adjustment_isin ON price_adjustment (isin, ex_date)""",
+    "delivery": """
+CREATE TABLE IF NOT EXISTS delivery (
+    trade_date TEXT NOT NULL, symbol TEXT NOT NULL, series TEXT NOT NULL, isin TEXT, ttl_qty INTEGER NOT NULL, deliv_qty INTEGER,
+    deliv_per REAL, trades INTEGER, PRIMARY KEY (trade_date, symbol, series));
+CREATE INDEX IF NOT EXISTS ix_delivery_isin ON delivery (isin, trade_date)""",
+    "isin_succession": """
+CREATE TABLE IF NOT EXISTS isin_succession (
+    exchange TEXT NOT NULL, symbol TEXT NOT NULL, old_isin TEXT NOT NULL, new_isin TEXT NOT NULL, change_date TEXT NOT NULL,
+    source TEXT NOT NULL, PRIMARY KEY (old_isin, new_isin));
+CREATE INDEX IF NOT EXISTS ix_isin_succession_new ON isin_succession (new_isin)""",
     "us_price": """
 CREATE TABLE IF NOT EXISTS us_price (
     symbol TEXT NOT NULL, trade_date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL NOT NULL, adj_close REAL, volume INTEGER,
@@ -177,6 +191,11 @@ def persist_macro(store, series: str, rows: Iterable[dict], source: str) -> int:
                         ("series", "obs_date"))
 
 
+def persist_macro_bundle(store, data: dict, source: str = "mospi") -> int:
+    """A provider result carrying `series: {name: [{date, value}]}` (MoSPI CPI / WPI / IIP / reserves): one macro_series write each."""
+    return sum(persist_macro(store, name, pts, source) for name, pts in (data.get("series") or {}).items() if pts)
+
+
 def prune_incomplete(store, series: str, today: str) -> None:
     """Remove bars of a market series dated today or on a weekend (an unfinished or weekend quote, never a session close).
     Weekend special sessions (Muhurat trading) are kept."""
@@ -221,6 +240,31 @@ def persist_prices(store, rows, exchange: str) -> int:
     keep = ("trade_date", "isin", "series", "symbol", "open", "high", "low", "close", "prev_close", "volume", "turnover", "trades")
     out = [{**{k: r.get(k) for k in keep}, "exchange": exchange, "series": r.get("series") or "-"} for r in rows]
     return store.upsert("price_eod", out, ("trade_date", "isin", "exchange", "series")) if out else 0
+
+
+def persist_delivery(store, rows) -> int:
+    """NSE delivery rows, each tagged with its ISIN from the same session's stored prices (symbol + series), falling back to the
+    security master. A row that cannot be resolved is stored with ISIN NULL (and counted by `unresolved_delivery`), never dropped."""
+    ensure(store, "delivery", "price_eod")
+    if not rows:
+        return 0
+    day = rows[0]["trade_date"]
+    by_ss = {(r["symbol"], r["series"]): r["isin"] for r in store.query("SELECT symbol, series, isin FROM price_eod WHERE exchange='NSE' AND trade_date=?", (day,))}
+    by_sym = {}
+    for r in store.query("SELECT isin, nse_symbol FROM security WHERE nse_symbol IS NOT NULL"):
+        by_sym.setdefault(r["nse_symbol"], []).append(r["isin"])
+    out = []
+    for r in rows:
+        isin = by_ss.get((r["symbol"], r["series"]))
+        if isin is None and len(by_sym.get(r["symbol"], [])) == 1:
+            isin = by_sym[r["symbol"]][0]
+        out.append({**{k: r[k] for k in ("trade_date", "symbol", "series", "ttl_qty", "deliv_qty", "deliv_per", "trades")}, "isin": isin})
+    return store.upsert("delivery", out, ("trade_date", "symbol", "series"))
+
+
+def unresolved_delivery(store, day: str) -> int:
+    ensure(store, "delivery")
+    return store.query("SELECT COUNT(*) AS n FROM delivery WHERE trade_date=? AND isin IS NULL AND deliv_per IS NOT NULL", (day,))[0]["n"]
 
 
 def persist_deals(store, rows, source: str) -> int:
@@ -410,55 +454,165 @@ def persist_fpi(store, data: dict) -> int:
     return n + (store.upsert("fpi_nsdl_deriv", der, ("report_date", "product")) if der else 0)
 
 
-# --- split / bonus / rights adjustment -------------------------------------------------------------------------
-ADJ_MIN_MOVE = 0.005        # prev_close must differ from the stored last close by more than 0.5% to be an adjustment
-ADJ_GAP_SHARE = 0.20        # a day where more than this share of stocks 'adjust' is a missing day in the store, not actions
+# --- split / bonus adjustment + ISIN succession ----------------------------------------------------------------
+# The exchanges do NOT adjust the bhavcopy's previous close on the ex-date (NSE: CONCORDBIO bonus 1:1 on 2026-11-04 shows
+# prev_close 1227.9 and close 655.5), and a face-value split gives the stock a NEW ISIN from the ex-date (KMEW
+# INE0CJD01029 -> INE0CJD01037). So the factor comes from the corporate action's own terms and is only applied after the
+# stored prices confirm the step. Rights issues are not adjusted (their price effect needs the issue price and is small).
+ADJ_TOL = 0.30            # observed close ratio may differ from the expected factor by this much (daily limits + the day's own move)
+ADJ_MAX_GAP_DAYS = 5      # the ex-date session must be stored within this many days of the ex-date
+SUCC_MAX_GAP_DAYS = 7     # an ISIN change on the same symbol counts as a succession only if the sessions are this close
+
+_FROM_TO = re.compile(r"from\s+(?:rs|re)\.?\s*(\d+(?:\.\d+)?).{0,40}?\bto\s+(?:rs|re)\.?\s*(\d+(?:\.\d+)?)", re.I | re.S)
+_BONUS = re.compile(r"bonus\D{0,30}?(\d+)\s*:\s*(\d+)", re.I)
+
+
+def expected_factor(kind: str, subject: str) -> float | None:
+    """The price factor a split / bonus implies, from the action's wording; None when the wording cannot be read."""
+    s = " ".join((subject or "").split())
+    ft, bo = _FROM_TO.search(s), _BONUS.search(s)
+    if kind == "split" and ft and not bo:
+        old, new = float(ft.group(1)), float(ft.group(2))
+        return round(new / old, 8) if old > 0 and new > 0 else None
+    if kind == "bonus" and bo and not ft:
+        new, held = int(bo.group(1)), int(bo.group(2))
+        return round(held / (new + held), 8) if new > 0 and held > 0 else None
+    return None
+
+
+def _migrate_adjustment_table(store) -> None:
+    """The first price_adjustment layout (prev_close mismatch detector) is derived data with the wrong premise: drop it."""
+    cols = {r["name"] for r in store.query("PRAGMA table_info(price_adjustment)")}
+    if cols and "symbol" not in cols:
+        store.drop_table("price_adjustment")
+        ensure(store, "price_adjustment")
+
+
+def _session(store, exchange: str, symbol: str, isin: str | None, *, on_or_after: str | None = None, before: str | None = None):
+    """The busiest stored row of the nearest session on/after a date or before it, for one stock. NSE rows are found by symbol
+    (the symbol survives the ISIN change); BSE actions carry only an ISIN."""
+    who, args = ("symbol = ?", [symbol]) if exchange == "NSE" else ("isin = ?", [isin])
+    if on_or_after:
+        where, order, args = f"{who} AND trade_date >= ?", "trade_date ASC", args + [on_or_after]
+    else:
+        where, order, args = f"{who} AND trade_date < ?", "trade_date DESC", args + [before]
+    r = store.query(f"SELECT trade_date, isin, series, close FROM price_eod WHERE exchange = ? AND {where} ORDER BY {order}, COALESCE(volume, 0) DESC LIMIT 1",
+                    tuple([exchange] + args))
+    return r[0] if r else None
+
+
+def _days(a: str, b: str) -> int:
+    return abs((date.fromisoformat(a) - date.fromisoformat(b)).days)
 
 
 def rebuild_adjustments(store, *, since: str | None = None) -> dict:
-    """Find split / bonus / rights adjustments from the exchange's own previous close.
+    """Split / bonus adjustment events and ISIN successions from the stored corporate actions and prices.
 
-    On an ex-date the bhavcopy's previous close is the adjusted one (a 1:10 split shows 1/10 of the last close), so
-    factor = prev_close(ex-date) / close(previous stored session) for the same ISIN, exchange and series. Dividends are
-    not adjusted by the exchange, so they never show up here. A day where a large share of all stocks show a factor is
-    a session missing from the store (both closes then refer to different days): such days are skipped and returned.
-    Each event is labelled from corp_action when an action of that kind is stored for the ISIN and ex-date."""
-    ensure(store, "price_eod", "price_adjustment", "corp_action")
+    Each stored split or bonus whose ex-date session is already in the price table becomes one event:
+      expected factor from the action's wording (split: new face value / old; bonus a:b -> b / (a + b)),
+      observed ratio = close(ex-date session) / close(previous stored session) for the same stock (found by symbol, so an ISIN
+      change does not break it). The event is `verified` (and applied to earlier prices) only when the observed ratio is within
+      ADJ_TOL of the expected one and closer to it than to 1.0; otherwise it is stored with the reason and NOT applied.
+    Returns {events (verified), unverified, unparsed, successions, checked, since}."""
+    ensure(store, "price_eod", "price_adjustment", "isin_succession", "corp_action")
+    _migrate_adjustment_table(store)
     lo = since or "0000-00-00"
-    rows = store.query(f"""
-        WITH s AS (SELECT isin, exchange, series, trade_date, close, prev_close,
-                          LAG(close) OVER w AS last_close, LAG(trade_date) OVER w AS last_date
-                   FROM price_eod WINDOW w AS (PARTITION BY isin, exchange, series ORDER BY trade_date))
-        SELECT * FROM s WHERE trade_date >= ? AND last_close IS NOT NULL AND last_close > 0 AND prev_close IS NOT NULL
-               AND prev_close > 0""", (lo,))
-    per_day: dict[tuple[str, str], list] = {}
-    for r in rows:
-        per_day.setdefault((r["trade_date"], r["exchange"]), []).append(r)
-    events, gap_days = [], []
-    for (day, exch), rs in sorted(per_day.items()):
-        moved = [r for r in rs if abs(r["prev_close"] / r["last_close"] - 1) > ADJ_MIN_MOVE]
-        if len(rs) >= 50 and len(moved) > ADJ_GAP_SHARE * len(rs):
-            gap_days.append({"date": day, "exchange": exch, "stocks": len(rs), "moved": len(moved)})
+    acts = store.query("SELECT symbol, ex_date, subject, isin, kind FROM corp_action WHERE kind IN ('split', 'bonus') AND ex_date >= ? "
+                       "ORDER BY ex_date, symbol", (lo,))
+    out, unparsed, successions = [], [], []
+    for a in acts:
+        bse = a["symbol"].startswith("BSE:")
+        exchange = "BSE" if bse else "NSE"
+        e = expected_factor(a["kind"], a["subject"])
+        base = {"exchange": exchange, "symbol": a["symbol"], "ex_date": a["ex_date"], "kind": a["kind"], "isin": a["isin"], "new_isin": None,
+                "factor": None, "expected_factor": e, "observed_ratio": None, "verified": 0, "reason": None, "subject": a["subject"],
+                "last_close": None, "last_date": None, "ex_close": None}
+        if e is None:
+            unparsed.append({"symbol": a["symbol"], "ex_date": a["ex_date"], "subject": a["subject"]})
+            out.append({**base, "reason": "terms not readable from the action wording"})
             continue
-        events += moved
-    out = []
-    for r in events:
-        act = store.query("SELECT kind, subject FROM corp_action WHERE isin=? AND ex_date=? AND kind IN ('split', 'bonus', 'rights') LIMIT 1",
-                          (r["isin"], r["trade_date"]))
-        out.append({"isin": r["isin"], "exchange": r["exchange"], "series": r["series"], "ex_date": r["trade_date"],
-                    "factor": round(r["prev_close"] / r["last_close"], 6), "prev_close": r["prev_close"], "last_close": r["last_close"],
-                    "last_date": r["last_date"], "kind": act[0]["kind"] if act else None, "subject": act[0]["subject"] if act else None})
+        if bse and not a["isin"]:
+            out.append({**base, "reason": "BSE action without an ISIN mapping"})
+            continue
+        ex = _session(store, exchange, a["symbol"], a["isin"], on_or_after=a["ex_date"])
+        if ex is None:
+            continue                                   # an upcoming action: no session yet, nothing to record
+        prev = _session(store, exchange, a["symbol"], a["isin"], before=ex["trade_date"])
+        if _days(ex["trade_date"], a["ex_date"]) > ADJ_MAX_GAP_DAYS:
+            continue                                   # the stored session is far from the ex-date: another event's data
+        if prev is None or not prev["close"] or not ex["close"]:
+            out.append({**base, "reason": "no stored session before the ex-date (history starts later)"})
+            continue
+        obs = ex["close"] / prev["close"]
+        d_exp, d_one = abs(math.log(obs / e)), abs(math.log(obs))
+        verified = d_exp <= math.log(1 + ADJ_TOL) and d_exp < d_one
+        why = None if verified else (f"price step {obs:.3f} is not close to the expected {e:g}" if d_exp > math.log(1 + ADJ_TOL)
+                                     else f"price step {obs:.3f} is closer to no change than to the expected {e:g}")
+        row = {**base, "isin": prev["isin"], "new_isin": ex["isin"] if ex["isin"] != prev["isin"] else None, "observed_ratio": round(obs, 6),
+               "verified": int(verified), "reason": why, "factor": e if verified else None, "last_close": prev["close"],
+               "last_date": prev["trade_date"], "ex_close": ex["close"]}
+        out.append(row)
+        if row["new_isin"]:
+            successions.append({"exchange": exchange, "symbol": a["symbol"], "old_isin": row["isin"], "new_isin": row["new_isin"],
+                                "change_date": ex["trade_date"], "source": "action"})
+    successions += _price_successions(store, lo)
     if since is None:
         store.delete_where("price_adjustment", "1=1", ())
     else:
         store.delete_where("price_adjustment", "ex_date >= ?", (since,))
-    n = store.upsert("price_adjustment", out, ("isin", "exchange", "series", "ex_date")) if out else 0
-    return {"events": n, "labelled": sum(1 for x in out if x["kind"]), "gap_days": gap_days, "since": since}
+    n = store.upsert("price_adjustment", out, ("exchange", "symbol", "ex_date", "kind")) if out else 0
+    uniq = {(s["old_isin"], s["new_isin"]): s for s in successions}            # an action-sourced row wins over a price-sourced one
+    for s in successions:
+        if s["source"] == "action":
+            uniq[(s["old_isin"], s["new_isin"])] = s
+    if uniq:
+        store.upsert("isin_succession", list(uniq.values()), ("old_isin", "new_isin"))
+    ver = [x for x in out if x["verified"]]
+    return {"events": len(ver), "unverified": [{k: x[k] for k in ("symbol", "ex_date", "kind", "reason")} for x in out if not x["verified"] and x["reason"]],
+            "unparsed": unparsed, "successions": len(uniq), "checked": n, "since": since}
+
+
+def _price_successions(store, lo: str) -> list[dict]:
+    """ISIN changes seen in the price table itself: the same symbol, consecutive sessions, the old ISIN never trades again
+    and the new one never traded before. Catches ISIN changes with no stored action (older history, other corporate events)."""
+    cand = store.query("""
+        WITH d AS (SELECT DISTINCT exchange, symbol, isin, trade_date FROM price_eod WHERE symbol IS NOT NULL AND trade_date >= ?),
+             s AS (SELECT exchange, symbol, isin, trade_date, LAG(isin) OVER w AS prev_isin, LAG(trade_date) OVER w AS prev_date
+                   FROM d WINDOW w AS (PARTITION BY exchange, symbol ORDER BY trade_date, isin))
+        SELECT exchange, symbol, prev_isin, isin, trade_date, prev_date FROM s WHERE prev_isin IS NOT NULL AND prev_isin <> isin""", (lo,))
+    out = []
+    for c in cand:
+        if _days(c["trade_date"], c["prev_date"]) > SUCC_MAX_GAP_DAYS:
+            continue
+        old_last = store.query("SELECT MAX(trade_date) d FROM price_eod WHERE exchange=? AND symbol=? AND isin=?", (c["exchange"], c["symbol"], c["prev_isin"]))[0]["d"]
+        new_first = store.query("SELECT MIN(trade_date) d FROM price_eod WHERE exchange=? AND symbol=? AND isin=?", (c["exchange"], c["symbol"], c["isin"]))[0]["d"]
+        if old_last is not None and new_first is not None and old_last < new_first:
+            out.append({"exchange": c["exchange"], "symbol": c["symbol"], "old_isin": c["prev_isin"], "new_isin": c["isin"],
+                        "change_date": new_first, "source": "prices"})
+    return out
+
+
+def isin_chain(store, isin: str) -> list[str]:
+    """Every ISIN this security has traded under (oldest first is not guaranteed): follows isin_succession both ways."""
+    ensure(store, "isin_succession")
+    seen, todo = {isin}, [isin]
+    while todo:
+        cur = todo.pop()
+        for r in store.query("SELECT old_isin, new_isin FROM isin_succession WHERE old_isin = ? OR new_isin = ?", (cur, cur)):
+            for x in (r["old_isin"], r["new_isin"]):
+                if x not in seen:
+                    seen.add(x)
+                    todo.append(x)
+    return sorted(seen)
 
 
 def adjustments_for(store, isin: str) -> list[dict]:
+    """Verified split / bonus events for a security, including events recorded under its earlier or later ISINs."""
     ensure(store, "price_adjustment")
-    return store.query("SELECT * FROM price_adjustment WHERE isin=? ORDER BY ex_date", (isin,))
+    chain = isin_chain(store, isin)
+    marks = ",".join("?" * len(chain))
+    return store.query(f"SELECT * FROM price_adjustment WHERE verified = 1 AND (isin IN ({marks}) OR new_isin IN ({marks})) ORDER BY ex_date",
+                       tuple(chain) * 2)
 
 
 # --- US --------------------------------------------------------------------------------------------------------------

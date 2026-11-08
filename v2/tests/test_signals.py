@@ -246,6 +246,55 @@ def test_cycle_phase_with_nothing_is_no_clear_phase(st):
     assert s["label"] == "no clear phase" and all(v == 0.25 for v in s["details"]["probabilities"].values())
 
 
+def put_india(st, **series):
+    """series: name -> [(obs_date, value)] stored as mospi:<name>"""
+    for name, pts in series.items():
+        st.ensure_table(ds.DDL["macro_series"])
+        ds.persist_macro(st, f"mospi:{name}", [{"date": d, "value": v} for d, v in pts], "mospi")
+
+
+def test_cycle_phase_uses_india_cpi_only_once_it_is_published(st):
+    put_india(st, cpi_yoy=[("2026-09-30", 6.4)])
+    before = cycle.cycle_phase(st, date(2026, 10, 11)).data            # September CPI comes out on the 12th
+    assert before["details"]["inputs"]["india_cpi_yoy"] is None and any("cpi_yoy: nothing published yet" in m for m in before["missing"])
+    after = cycle.cycle_phase(st, date(2026, 10, 12)).data
+    assert after["details"]["inputs"]["india_cpi_yoy"] == 6.4 and after["details"]["probabilities"]["Late"] == 1.0    # CPI above 6 is a Late input
+
+
+def test_cycle_phase_cpi_below_the_band_is_not_late(st):
+    put_india(st, cpi_yoy=[("2026-09-30", 5.54)])
+    s = cycle.cycle_phase(st, date(2026, 11, 8)).data
+    late = [c for c in s["components"] if c["input"].startswith("Late:")][0]
+    assert s["details"]["inputs"]["india_cpi_yoy"] == 5.54 and late["value"] is False and "India CPI > 6.0%" in late["input"]
+
+
+def test_cycle_phase_ignores_and_names_a_stale_iip(st):
+    put_india(st, iip_yoy=[("2026-03-31", 4.1)])
+    s = cycle.cycle_phase(st, date(2026, 11, 8)).data
+    assert s["details"]["inputs"]["india_iip_yoy"] is None
+    assert any("iip_yoy: latest is 2026-03" in m for m in s["missing"]) and any("IIP growth positive" in m for m in s["missing"])
+    fresh = cycle.cycle_phase(st, date(2026, 5, 10)).data               # published 28 Apr, 40 days old on 10 May: used
+    assert fresh["details"]["inputs"]["india_iip_yoy"] == 4.1
+
+
+def test_cycle_phase_iip_sign_votes_for_expansion_or_contraction(st):
+    put_india(st, iip_yoy=[("2026-10-31", -1.2)])
+    s = cycle.cycle_phase(st, date(2026, 11, 30)).data
+    comps = {c["input"]: c for c in s["components"]}
+    assert "Contraction: IIP growth negative" in comps and "Expansion: IIP growth positive" in comps
+    assert s["details"]["probabilities"]["Contraction"] > 0 and s["details"]["probabilities"]["Expansion"] == 0.0
+
+
+def test_cycle_phase_inflation_easing_needs_enough_releases(st):
+    put_india(st, cpi_yoy=[("2026-06-30", 5.5), ("2026-07-31", 5.0)])
+    few = cycle.cycle_phase(st, date(2026, 9, 1)).data
+    assert any("inflation easing" in m for m in few["missing"])
+    put_india(st, cpi_yoy=[("2026-04-30", 6.1), ("2026-05-31", 5.9)])
+    many = cycle.cycle_phase(st, date(2026, 9, 1)).data
+    ease = [c for c in many["components"] if "inflation easing" in c["input"]]
+    assert ease and ease[0]["text"] == "met"                            # 5.0 now vs 6.1 three releases ago
+
+
 # --- disclosure (pulled forward) -------------------------------------------------------------------------------
 def insider(st, rows):
     from drishti.jobs import INSIDER_DDL

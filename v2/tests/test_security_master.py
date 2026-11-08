@@ -91,11 +91,13 @@ def test_merge_reports_what_it_does_not_trust():
 
 
 # --- provider ---------------------------------------------------------------------------------------
-def fake_inputs(monkeypatch, *, eq=None, bse_res=None, nse_res=None):
+def fake_inputs(monkeypatch, *, eq=None, bse_res=None, nse_res=None, scrips=None):
     monkeypatch.setattr(sm, "get", lambda url, profile, expect="text", **k: Fetched(url, eq if eq is not None else EQL, 200))
     ok = lambda rows, d="2026-11-06": Result(data=rows, as_of=d)  # noqa: E731
     monkeypatch.setattr(sm.bse, "bhavcopy", lambda d, store=None: bse_res or ok(bse_rows()))
     monkeypatch.setattr(sm.nse_archive, "cm_bhavcopy", lambda d, store=None: nse_res or ok(nse_cm_rows()))
+    down = Result(error=DrishtiError(ErrorKind.NETWORK, "scrip list not available in this test"))
+    monkeypatch.setattr(sm.bse, "scrip_list", lambda: scrips or down)       # never the live endpoint
 
 
 def overlapping_eq() -> bytes:
@@ -112,7 +114,7 @@ def test_equity_list_freshness(monkeypatch):
 
 
 def test_build_writes_to_store_and_checks_the_join(monkeypatch):
-    fake_inputs(monkeypatch, eq=overlapping_eq())
+    fake_inputs(monkeypatch, eq=overlapping_eq(), scrips=Result(data=[], as_of="2026-11-08"))
     with Store() as st:
         r = sm.build_security_master(st, today=date(2026, 11, 8), min_equity_rows=1, max_listing_age_days=400)
         assert r.ok and r.as_of == "2026-11-06" and r.data["stats"]["overlap"] == 1.0 and r.data["stats"]["warnings"] == []
@@ -120,6 +122,18 @@ def test_build_writes_to_store_and_checks_the_join(monkeypatch):
         n = st.query("SELECT COUNT(*) AS n FROM security")[0]["n"]
         assert n == r.data["securities"]
         assert sm.build_security_master(st, today=date(2026, 11, 8), min_equity_rows=1, max_listing_age_days=400).ok and st.query("SELECT COUNT(*) AS n FROM security")[0]["n"] == n  # idempotent
+
+
+def test_build_adds_scrips_the_bhavcopy_did_not_show_and_warns_when_the_list_is_down(monkeypatch):
+    extra = [{"scrip_code": "599999", "isin": "INE467D01017", "symbol": "NEWCO", "group": "B", "name": "Newco"}]
+    fake_inputs(monkeypatch, eq=overlapping_eq(), scrips=Result(data=extra, as_of="2026-11-08"))
+    with Store() as st:
+        r = sm.build_security_master(st, today=date(2026, 11, 8), min_equity_rows=1, max_listing_age_days=400)
+        assert r.ok and r.data["stats"]["warnings"] == []
+    fake_inputs(monkeypatch, eq=overlapping_eq())                                  # list unavailable: loud warning, build still succeeds
+    with Store() as st:
+        r = sm.build_security_master(st, today=date(2026, 11, 8), min_equity_rows=1, max_listing_age_days=400)
+        assert r.ok and "scrip list unavailable" in r.data["stats"]["warnings"][0] and "NETWORK" in r.data["stats"]["warnings"][0]
 
 
 def test_build_refuses_when_nse_and_bse_do_not_line_up(monkeypatch):

@@ -6,7 +6,7 @@ are missing are listed, never assumed. PMI and India inflation are not collected
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from . import flows, history as h, market
 from .base import Component, Signal, ok, params
@@ -29,6 +29,28 @@ def _rates_bottoming(store, on, n):
     return (all(views) if views else None), {"us10y": len(us) > n, "india_gsec": len(gsec) > n}
 
 
+def _india_macro(store, on, p):
+    """(cpi_points newest-first, iip_yoy or None, notes). A reading counts only if it was published by `on` and its reference
+    month is not older than macro_max_age_days; otherwise it is named in `notes` and left out."""
+    im = params("india_macro")[0]
+    day = on.isoformat() if isinstance(on, date) else on or date.today().isoformat()
+    cutoff = (date.fromisoformat(day) - timedelta(days=p["macro_max_age_days"])).isoformat()
+    notes = []
+
+    def fresh(series, lag, n):
+        pts = h.macro_released(store, series, on, lag, n)
+        if not pts:
+            notes.append(f"{series.split(':')[1]}: nothing published yet")
+            return []
+        if pts[0][0] < cutoff:
+            notes.append(f"{series.split(':')[1]}: latest is {pts[0][0][:7]} (older than {p['macro_max_age_days']} days), not used")
+            return []
+        return pts
+    cpi = fresh("mospi:cpi_yoy", im["cpi_release_lag_days"], p["inflation_easing_months"] + 1)
+    iip = fresh("mospi:iip_yoy", im["iip_release_lag_days"], 1)
+    return cpi, (iip[0][1] if iip else None), notes
+
+
 def cycle_phase(store, on=None):
     p, ver = params("cycle_phase")
     ind = market.macro_inputs(store, on)
@@ -42,6 +64,9 @@ def cycle_phase(store, on=None):
     quad = {s["name"]: s["quadrant"] for s in rot.data["details"]["sectors"]} if rot.ok else {}
     defs = [quad[x] for x in p["defensives"] if x in quad]
     rates, rate_views = _rates_bottoming(store, on, p["rates_window_days"])
+    cpi_pts, iip_yoy, macro_notes = _india_macro(store, on, p)
+    cpi = cpi_pts[0][1] if cpi_pts else None
+    easing = (cpi_pts[0][1] < cpi_pts[-1][1]) if len(cpi_pts) > p["inflation_easing_months"] else None
 
     def either(a, b):
         if a is None and b is None:
@@ -49,18 +74,22 @@ def cycle_phase(store, on=None):
         return bool(a) or bool(b)
 
     cond = {
-        "Late": {f"Brent > {p['late_brent_above']} or US 10Y > {p['late_us10y_above']}%":
-                 either(None if brent is None else brent > p["late_brent_above"], None if us10y is None else us10y > p["late_us10y_above"])},
+        "Late": {f"Brent > {p['late_brent_above']} or US 10Y > {p['late_us10y_above']}% or India CPI > {p['late_cpi_above']}%":
+                 either(either(None if brent is None else brent > p["late_brent_above"], None if us10y is None else us10y > p["late_us10y_above"]),
+                        None if cpi is None else cpi > p["late_cpi_above"])},
         "Contraction": {"FII selling": None if fii is None else fii < 0,
                         "midcaps lagging": None if mid_label is None else mid_label == "midcaps lagging",
-                        "defensive rotation (a defensive Leading/Improving)": None if not defs else any(q in ("Leading", "Improving") for q in defs)},
+                        "defensive rotation (a defensive Leading/Improving)": None if not defs else any(q in ("Leading", "Improving") for q in defs),
+                        "IIP growth negative": None if iip_yoy is None else iip_yoy < 0},
         "Expansion": {"midcaps outperforming": None if mid_label is None else mid_label == "midcaps outperforming",
-                      "FII buying": None if fii is None else fii > 0},
+                      "FII buying": None if fii is None else fii > 0,
+                      "IIP growth positive": None if iip_yoy is None else iip_yoy > 0},
         "Recovery": {"rates bottoming": rates,
                      "DII support": None if dii is None else dii > 0,
-                     "defensives cooling (Weakening/Lagging)": None if not defs else all(q in ("Weakening", "Lagging") for q in defs)},
+                     "defensives cooling (Weakening/Lagging)": None if not defs else all(q in ("Weakening", "Lagging") for q in defs),
+                     f"CPI inflation easing over {p['inflation_easing_months']} releases": easing},
     }
-    weights, comps, missing = {}, [], list(p["missing_inputs"])
+    weights, comps, missing = {}, [], list(p["missing_inputs"]) + [f"India macro: {n}" for n in macro_notes]
     for phase, cs in cond.items():
         known = {k: v for k, v in cs.items() if v is not None}
         weights[phase] = (sum(known.values()) / len(known)) if known else 0.0
@@ -81,6 +110,6 @@ def cycle_phase(store, on=None):
                      "inflation inputs land. Favoured sectors per v1: Late = IT/Pharma + large-cap quality; Contraction = defensives, "
                      "cash; Expansion = cyclicals, midcaps, capex; Recovery = rate-sensitives, financials, early cyclicals.",
                      ver, provisional=True, details={"probabilities": probs, "inputs": {"brent": brent, "us10y": us10y, "fii_net": fii,
-                                                                                         "dii_net": dii, "midcap": mid_label,
+                                                                                         "dii_net": dii, "midcap": mid_label, "india_cpi_yoy": cpi, "india_iip_yoy": iip_yoy,
                                                                                          "defensives": dict(zip(p["defensives"], defs)),
                                                                                          "rates_views": rate_views}}))

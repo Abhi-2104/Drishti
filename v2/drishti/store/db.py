@@ -140,6 +140,11 @@ class Store:
             self._db.commit()
         return len(rows)
 
+    def drop_table(self, table: str) -> None:
+        """Drop a DERIVED table whose layout changed (it is rebuilt from stored source data). Never used for raw or source tables."""
+        _ident(table)
+        self._run(f"DROP TABLE IF EXISTS {table}")
+
     def delete_where(self, table: str, where: str, params: Sequence[Any]) -> int:
         """DELETE FROM table WHERE <where> with bound parameters; `where` is written by code, never by data."""
         _ident(table)

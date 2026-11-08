@@ -132,6 +132,59 @@ def corporate_actions(store, query: str) -> Result:
 
 
 @guard
+def delivery(store, query: str, *, days: int = 60) -> Result:
+    """Delivery % (delivered quantity / traded quantity) per session for one NSE stock, newest first, with the 20-session mean.
+    Stored from the day the eod_flows job (or `backfill delivery`) first ran; trade-for-trade series carry no delivery figure."""
+    m = company(store, query)
+    if not m["nse_symbol"]:
+        raise DrishtiError(ErrorKind.NOT_FOUND, f"{m['name']} is not listed on NSE; delivery % is published for NSE stocks only")
+    ds.ensure(store, "delivery")
+    ids = ds.isin_chain(store, m["isin"])
+    marks = ",".join("?" * len(ids))
+    since = (today_ist() - timedelta(days=days)).isoformat()
+    rows = store.query(f"SELECT trade_date, series, ttl_qty, deliv_qty, deliv_per, trades FROM delivery "
+                       f"WHERE (symbol=? OR isin IN ({marks})) AND trade_date >= ? ORDER BY trade_date DESC, series",
+                       (m["nse_symbol"], *ids, since))
+    if not rows:
+        raise DrishtiError(ErrorKind.EMPTY, f"no delivery rows for {m['nse_symbol']} in the last {days} days; stored from the first "
+                           "eod_flows run, earlier sessions need `backfill delivery`")
+    main = [r for r in rows if r["deliv_per"] is not None]
+    last20 = [r["deliv_per"] for r in main[:20]]
+    return Result(data={"company": m["name"], "symbol": m["nse_symbol"], "latest": main[0] if main else None,
+                        "mean_20_sessions": round(sum(last20) / len(last20), 2) if last20 else None, "sessions_in_mean": len(last20),
+                        "rows": rows},
+                  as_of=rows[0]["trade_date"])
+
+
+@guard
+def india_macro(store, *, as_of: str | None = None) -> Result:
+    """Latest stored India CPI, WPI, IIP and RBI reserves, each with its reference month, publication state and a stale flag.
+    Only readings published by `as_of` count (reference-month end + the release lag in params.toml)."""
+    from .providers import mospi
+    from .signals import history as hist
+    from .signals.base import params
+    p, _ = params("india_macro")
+    day = as_of or today_ist().isoformat()
+    spec = {"cpi_yoy": ("cpi", "cpi_release_lag_days", "%"), "cpi_food_yoy": ("cpi", "cpi_release_lag_days", "%"),
+            "cpi_index": ("cpi", "cpi_release_lag_days", ""), "wpi_index": ("wpi", "wpi_release_lag_days", ""),
+            "iip_yoy": ("iip", "iip_release_lag_days", "%"), "iip_index": ("iip", "iip_release_lag_days", ""),
+            "fx_reserves_usd_mn": ("rbi_reserves", "reserves_release_lag_days", "US$ mn")}
+    out, any_found = {}, False
+    for name, (kind, lag, unit) in spec.items():
+        pts = hist.macro_released(store, f"mospi:{name}", day, p[lag], 1)
+        if not pts:
+            out[name] = {"value": None, "note": "nothing stored or published yet"}
+            continue
+        any_found = True
+        obs, val = pts[0]
+        age = (date.fromisoformat(day) - date.fromisoformat(obs)).days
+        out[name] = {"value": val, "unit": unit, "reference_month": obs[:7], "age_days": age, "stale": age > mospi.MAX_AGE[kind]}
+    if not any_found:
+        raise DrishtiError(ErrorKind.EMPTY, "no India macro stored; run `drishti run macro_india`")
+    return Result(data=out, as_of=day)
+
+
+@guard
 def credit_ratings(store, query: str) -> Result:
     m = company(store, query)
     rows = _table_for(store, "credit_rating", "isin=? OR symbol=?", (m["isin"], m["nse_symbol"] or "-"), "rating_date DESC")

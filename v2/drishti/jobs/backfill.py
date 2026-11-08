@@ -124,9 +124,20 @@ def backfill_prices(store, *, days=380, budget_s=3600, start=None, progress=_noo
     ds.ensure(store, "price_eod")
     rep = _daily(store, "prices", "price_eod", fetch, persist, days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
     adj = ds.rebuild_adjustments(store)
-    progress(f"   ...prices: {adj['events']} split/bonus/rights adjustments found ({adj['labelled']} matched to a stored corporate action)"
-             + (f"; {len(adj['gap_days'])} days look like missing sessions and were skipped" if adj["gap_days"] else ""))
+    progress(_adj_line(adj, "prices"))
     return rep
+
+
+def backfill_delivery(store, *, days=380, budget_s=3600, start=None, progress=_noop):
+    """Delivery quantity and % per stock, one NSE file per session, so the delivery signal has a year of history."""
+    ds.ensure(store, "delivery")
+    return _daily(store, "delivery", "delivery", lambda d: nse_archive.delivery(d, store=None), lambda s, r: ds.persist_delivery(s, r.data),
+                  days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
+
+
+def _adj_line(adj: dict, tag: str) -> str:
+    return (f"   ...{tag}: {adj['events']} split/bonus events verified against the stored prices, {len(adj['unverified'])} not confirmed "
+            f"(not applied), {len(adj['unparsed'])} with unreadable terms, {adj['successions']} ISIN successions")
 
 
 def backfill_adjustments(store, *, progress=_noop, **_):
@@ -135,10 +146,9 @@ def backfill_adjustments(store, *, progress=_noop, **_):
     rep = BackfillReport("adjustments")
     adj = ds.rebuild_adjustments(store)
     rep.done, rep.rows = 1, adj["events"]
-    for g in adj["gap_days"]:
-        rep.failed.append({"date": g["date"], "kind": "GAP", "detail": f"{g['exchange']}: {g['moved']} of {g['stocks']} stocks 'adjusted' at once: "
-                                                                      "a session is missing from the store before this day"})
-    progress(f"   ...adjustments: {adj['events']} events, {adj['labelled']} labelled from corporate actions")
+    for x in adj["unparsed"]:
+        rep.failed.append({"date": x["ex_date"], "kind": "UNPARSED", "detail": f"{x['symbol']}: {x['subject'][:100]}"})
+    progress(_adj_line(adj, "adjustments"))
     return rep
 
 
@@ -163,6 +173,10 @@ def backfill_corp_actions(store, *, days=730, window=90, budget_s=1800, today=No
             if (tag, start.isoformat(), end.isoformat()) in have:
                 rep.skipped += 1
                 continue
+            if tag == "corp_bse" and k > 0:
+                if k == window:
+                    progress("   ...corp actions BSE: the endpoint has no history (it ignores its date range); past BSE-only actions cannot be backfilled")
+                continue
             r = fn()
             if r.ok or (r.error and r.error.kind == ErrorKind.EMPTY):
                 n = persist(store, r.data) if r.ok else 0
@@ -175,7 +189,7 @@ def backfill_corp_actions(store, *, days=730, window=90, budget_s=1800, today=No
                 rep.failed.append({"date": end.isoformat(), "kind": str(r.error.kind), "detail": f"{tag}: {r.error.detail[:150]}"})
                 progress(f"   ...corp actions {tag[5:].upper()} {start}..{end}: {r.error.kind}")
     adj = ds.rebuild_adjustments(store)
-    progress(f"   ...adjustments relabelled: {adj['labelled']} of {adj['events']} events matched to a corporate action")
+    progress(_adj_line(adj, "adjustments rebuilt"))
     return rep
 
 
@@ -354,6 +368,6 @@ def backfill_deals(store, *, days=365, window=30, kinds=COMPLETE_HISTORY_KINDS, 
 TARGETS = {
     "index_closes": backfill_index_closes, "participant_oi": backfill_participant_oi, "fo_index": backfill_fo_index,
     "prices": backfill_prices, "macro": backfill_macro, "insider": backfill_insider, "shp": backfill_shp, "deals": backfill_deals,
-    "corp_actions": backfill_corp_actions, "adjustments": backfill_adjustments,
+    "corp_actions": backfill_corp_actions, "adjustments": backfill_adjustments, "delivery": backfill_delivery,
 }
 DEFAULT_DAYS = {"prices": 380, "index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180, "deals": 365, "corp_actions": 730}

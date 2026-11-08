@@ -228,6 +228,16 @@ def build_server(open_store: Callable[[], Store]):
         return _with(dt.corporate_actions, query)
 
     @srv.tool()
+    def get_delivery(query: str, days: int = 60) -> dict:
+        """Delivery % per session for one NSE stock (delivered / traded quantity), newest first, with the 20-session mean."""
+        return _with(dt.delivery, query, days=days)
+
+    @srv.tool()
+    def get_india_macro(as_of: str | None = None) -> dict:
+        """India CPI (headline and food), WPI, IIP and RBI reserves: latest published reading, its month, age, and a stale flag."""
+        return _with(dt.india_macro, as_of=as_of)
+
+    @srv.tool()
     def get_credit_ratings(query: str) -> dict:
         """Credit-rating actions for one company, with the earlier rating and whether it moved up or down the scale."""
         return _with(dt.credit_ratings, query)

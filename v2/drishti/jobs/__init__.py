@@ -17,7 +17,7 @@ from ..core.canary import IST
 from ..core.envelope import DrishtiError, ErrorKind, Result
 from ..providers import _util as u
 from .. import signals
-from ..providers import cftc, fred, nsdl, nse_archive, nse_corp, nse_flows, nse_pit, nse_shp, security_master, yahoo
+from ..providers import cftc, fred, mospi, nsdl, nse_archive, nse_corp, nse_flows, nse_pit, nse_shp, security_master, yahoo
 from ..signals import disclosure
 from ..store import datasets as ds
 from ..providers import bse as bse_provider
@@ -179,6 +179,7 @@ WEEKLY_FRED = ("WALCL", "M2SL")
 
 STEPS = {
     "cm_bhavcopy": Step("cm_bhavcopy", _latest(nse_archive.cm_bhavcopy), persist=lambda st, r: ds.persist_prices(st, r.data, "NSE"), daily=True),
+    "delivery": Step("delivery", _latest(nse_archive.delivery), persist=_p(ds.persist_delivery), daily=True),
     "fo_bhavcopy": Step("fo_bhavcopy", _latest(nse_archive.fo_bhavcopy), persist=_p(ds.persist_fo_index), daily=True),
     "bse_bhavcopy": Step("bse_bhavcopy", lambda s, t: _bse_bhavcopy(s, t), persist=lambda st, r: ds.persist_prices(st, r.data, "BSE"), daily=True),
     "participant_oi": Step("participant_oi", _latest(nse_archive.participant_oi), persist=_p(ds.persist_participant_oi), daily=True),
@@ -209,6 +210,8 @@ STEPS = {
                          count=lambda r: 2),
     **{f"fred_{x}": _fred(x) for x in DAILY_FRED + WEEKLY_FRED},
     **{f"yahoo_{x}": _yahoo(x) for x in yahoo.SYMBOLS},
+    **{f"mospi_{k}": Step(f"mospi_{k}", lambda s, t, f=getattr(mospi, k): f(today=t), persist=lambda st, r: ds.persist_macro_bundle(st, r.data),
+                          count=lambda r: sum(len(v) for v in r.data["series"].values())) for k in ("cpi", "wpi", "iip", "rbi_reserves")},
     "cftc_tff": Step("cftc_tff", lambda s, t: cftc.cftc_tff(store=s, today=t), persist=_p(ds.persist_cftc)),
     "shp_master": Step("shp_master", lambda s, t: nse_shp.shp_master(store=s, today=t)),
     "security_master": Step("security_master", lambda s, t: security_master.build_security_master(s, today=t),
@@ -221,8 +224,8 @@ STEPS = {
 JOBS: dict[str, Job] = {j.name: j for j in (
     Job("eod_bhavcopy", "18:45", "NSE cash + F&O and BSE cash bhavcopies for the latest trading day, then split/bonus adjustments",
         tuple(STEPS[k] for k in ("cm_bhavcopy", "fo_bhavcopy", "bse_bhavcopy", "price_adjustments"))),
-    Job("eod_flows", "19:15", "Participant OI, F&O ban list, index closes, bulk and block deals, cash FII/DII",
-        tuple(STEPS[k] for k in ("participant_oi", "fo_ban_list", "index_closes", "bulk_deals", "block_deals", "fii_dii_cash"))),
+    Job("eod_flows", "19:15", "Participant OI, F&O ban list, index closes, bulk and block deals, cash FII/DII, delivery %",
+        tuple(STEPS[k] for k in ("participant_oi", "fo_ban_list", "index_closes", "bulk_deals", "block_deals", "fii_dii_cash", "delivery"))),
     Job("eod_corporate", "19:45", "Announcements, corporate actions (NSE, then BSE-only), board meetings and the BSE results "
         "calendar, credit ratings, large deals incl. short selling, IPO lists",
         tuple(STEPS[k] for k in ("announcements", "corp_actions", "bse_corp_actions", "board_meetings", "bse_result_calendar",
@@ -236,6 +239,8 @@ JOBS: dict[str, Job] = {j.name: j for j in (
     Job("macro_daily", "07:15", "Regime inputs: Yahoo DXY/US10Y/Brent/USD-INR/VIX and FRED daily series",
         tuple(STEPS[f"yahoo_{x}"] for x in yahoo.SYMBOLS) + tuple(STEPS[f"fred_{x}"] for x in DAILY_FRED)),
     Job("us_daily", "07:20", "Daily bars for every tracked US ticker (any ticker looked up once)", (STEPS["us_daily"],)),
+    Job("macro_india", "18:10", "India CPI, WPI, IIP and RBI reserves from MoSPI (monthly releases; a stale series is reported, not reused)",
+        tuple(STEPS[f"mospi_{k}"] for k in ("cpi", "wpi", "iip", "rbi_reserves"))),
     Job("macro_weekly", "Sat 10:00", "Fed balance sheet, US M2, CFTC positioning",
         tuple(STEPS[f"fred_{x}"] for x in WEEKLY_FRED) + (STEPS["cftc_tff"],)),
     Job("shp_master", "07:45", "Shareholding-pattern master: promoter holding per company with QoQ change", (STEPS["shp_master"],)),

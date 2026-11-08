@@ -16,6 +16,7 @@ $jobs = @(
     @("signals_daily",   "Daily",  "",          @("21:45"),          0,  0),
     @("premarket",       "Daily",  "",          @("08:45"),          30, 1),
     @("macro_daily",     "Daily",  "",          @("07:15"),          0,  0),
+    @("macro_india",     "Daily",  "",          @("18:10"),          0,  0),
     @("insider",         "Daily",  "",          @("07:30", "20:30"), 0,  0),
     @("shp_master",      "Daily",  "",          @("07:45"),          0,  0),
     @("us_daily",        "Daily",  "",          @("07:20"),          0,  0),
