@@ -4,7 +4,7 @@
 
 ## 1. Who does what
 - **Plan and build both happen in the claude.ai Project** ("Calibrate Drishti Investor Copilot"). Claude writes and edits code directly in the repo through the desktop app's folder connection; Abhijith / brother run it and report results back. No Claude Code. Structural changes to this plan are made here; the Project docs are the source of truth.
-- **Repo:** GitHub `Abhi-2104/Drishti`, cloned anywhere on any OS (currently Abhijith's Windows `Documents\Drishti`; the brother's machine is separate). Repo root = v1 (TypeScript, reference only — do not modify). v2 lives in `v2/`. `v2/phase0/probe.py` already exists and is the seed for `providers/`.
+- **Repo:** GitHub `Abhi-2104/Drishti`, cloned anywhere on any OS (currently Abhijith's Windows `Documents\Drishti`; the brother's machine is separate). `v1/` = the TypeScript v1 (reference only — do not modify). v2 lives in `v2/`. `v2/phase0/probe.py` already exists and is the seed for `providers/`.
 - **Network:** live fetches must run on a normal home/office network on your own machine. Claude's cloud and desktop-bridge sandboxes are proxy-blocked for NSE/BSE/FRED/Yahoo, so code is written and unit-tested there, but data runs happen on your machine — results from the sandboxes are not evidence.
 
 ## 2. Locked decisions

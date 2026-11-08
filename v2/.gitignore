@@ -1,5 +1,3 @@
-# Root .gitignore ignores tests/ (v1 scratch); v2 tests are tracked.
-!tests/
 
 # Scout run outputs: regenerate locally, do not commit
 phase0/scout/retest_*.json
