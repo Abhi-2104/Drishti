@@ -11,6 +11,6 @@ Rules:
    confidence       0.50 to 0.99 = the probability the call turns out right over the horizon (bullish: the stock beats the Nifty 50; bearish: it lags it; for the market gate: the Nifty 50 beats cash / lags cash). Omit for a no-call (WAIT, SKIP, NEUTRAL).
    thesis           at least 20 characters, in your own words, citing what you saw in the bundle
    invalidation     an observable event that would prove the call wrong: a price level, a signal reading, or a dated event. Not a restatement of the outcome ("it fails to beat the Nifty" is not an invalidation). Required for any call; omit for a no-call.
-   signals          the names of the bundle signals you leaned on (keys under stock.signals or market); only names that are present in the bundle
+   signals          the names of the bundle signals you leaned on (keys under stock.signals or market); only names that have a reading in the bundle. Never list a signal that appears under "unknown": the log refuses the whole answer
 3. A no-call is a valid, honest answer. Do not force a view. Do not copy a score from one signal alone; weigh them.
 4. When finished, reply with only the number of lines written.
