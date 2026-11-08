@@ -80,6 +80,59 @@ def tool_insider_trades(store: Store, query: str | None = None, days: int = 30, 
         return _env(Result(error=e))
 
 
+def _date(as_of: str | None) -> date | None:
+    return date.fromisoformat(as_of) if as_of else None
+
+
+def tool_signal(store: Store, name: str, as_of: str | None = None, query: str | None = None) -> dict:
+    """Compute one signal from stored data up to `as_of` (default today). Single-name signals need `query`."""
+    from . import signals
+    try:
+        on = _date(as_of)
+        kw = {}
+        if name in signals.SINGLE_NAME:
+            if not query:
+                raise DrishtiError(ErrorKind.PARSE_FAIL, f"{name} needs a company (ISIN, symbol or BSE scrip code)")
+            r = resolver.resolve(store, query)
+            if not r.ok:
+                raise r.error
+            if r.data["ambiguous"]:
+                raise DrishtiError(ErrorKind.PARSE_FAIL, f"{query!r} matches several companies, pass an ISIN: "
+                                                         f"{[m['name'] + ' (' + m['isin'] + ')' for m in r.data['matches']]}")
+            m = r.data["matches"][0]
+            kw = {"isin": m["isin"]} if name == "pledge" else {"isin": m["isin"], "symbol": m["nse_symbol"]}
+        return _env(signals.compute(store, name, on, **kw))
+    except ValueError as e:
+        return _env(Result(error=DrishtiError(ErrorKind.PARSE_FAIL, f"bad as_of date: {e}")))
+    except KeyError:
+        return _env(Result(error=DrishtiError(ErrorKind.NOT_FOUND, f"unknown signal {name!r}")))
+    except DrishtiError as e:
+        return _env(Result(error=e))
+
+
+def tool_disclosure_screen(store: Store, as_of: str | None = None) -> dict:
+    """Market-wide: companies with an insider cluster or size buying, and companies with pledge flags."""
+    from .signals import disclosure
+    try:
+        data = disclosure.screen(store, _date(as_of))
+        return _env(Result(data=data, as_of=data["as_of"]))
+    except ValueError as e:
+        return _env(Result(error=DrishtiError(ErrorKind.PARSE_FAIL, f"bad as_of date: {e}")))
+
+
+SIGNAL_TOOLS = {   # tool name -> (signal name, description). v1 names kept where v1 had the tool.
+    "get_macro_regime": ("macro_regime", "Macro tide, -6..+6: DXY, US 10Y, Brent, India VIX, USD/INR move, US-vs-India VIX (v1 thresholds)."),
+    "get_participant_oi": ("participant_oi", "Derivatives smart money: (FII + Pro) - Client from NSE participant OI; +/-4 = strong."),
+    "get_sector_rotation": ("sector_rotation", "Sector relative strength vs Nifty 50, RRG quadrant (Leading/Weakening/Improving/Lagging), fresh crosses."),
+    "get_seasonality": ("seasonality", "India calendar position: quarter theme, budget and monsoon stage, results season, next RBI MPC."),
+    "get_cycle_phase": ("cycle_phase", "Partial cycle-phase probabilities (Recovery/Expansion/Late/Contraction) from v1 /macro rules; lists missing inputs."),
+    "get_midcap_ratio": ("midcap_ratio", "Nifty Midcap 150 / Nifty 50 trend: midcaps outperforming or lagging."),
+    "get_fii_dii": ("fii_dii", "Cash-market FII/DII net flows: today, 5 and 20 sessions, streaks. Confirmation, not thesis."),
+    "get_liquidity": ("liquidity", "US liquidity: Fed balance sheet 13-week change and M2 year-on-year."),
+    "get_credit_spreads": ("credit_spreads", "US high-yield spread level and 20-session change, plus the 10Y-2Y curve."),
+}
+
+
 def build_server(open_store: Callable[[], Store]):
     """The MCP server. A store is opened per call and closed after, so a long-lived server never holds a stale connection."""
     from mcp.server.mcpserver import MCPServer   # imported here so the rest of drishti works without the SDK installed
@@ -107,6 +160,41 @@ def build_server(open_store: Callable[[], Store]):
         symbol or scrip code) for one company; optional `direction` BUY, SELL, PLEDGE, REVOKE or INVOKE."""
         with open_store() as st:
             return tool_insider_trades(st, query, days, direction, limit)
+
+    def _register(tool_name: str, signal_name: str, desc: str):
+        def fn(as_of: str | None = None) -> dict:
+            with open_store() as st:
+                return tool_signal(st, signal_name, as_of)
+        fn.__name__ = tool_name
+        fn.__doc__ = desc + " Optional as_of (YYYY-MM-DD) reads only data up to that date."
+        srv.tool(name=tool_name, description=fn.__doc__)(fn)
+
+    for t, (sig, desc) in SIGNAL_TOOLS.items():
+        _register(t, sig, desc)
+
+    @srv.tool()
+    def get_options_flow(symbol: str = "NIFTY", as_of: str | None = None) -> dict:
+        """Index options from the EOD F&O file: PCR (nearest expiry and all), max pain, call/put OI walls. symbol NIFTY or BANKNIFTY."""
+        with open_store() as st:
+            return tool_signal(st, f"options_flow:{symbol.upper()}", as_of)
+
+    @srv.tool()
+    def get_insider_cluster(query: str, as_of: str | None = None) -> dict:
+        """One company's open-market insider trades over 90 days: selling clusters (scoring.md strong negative) and size buying (strong positive)."""
+        with open_store() as st:
+            return tool_signal(st, "insider_cluster", as_of, query)
+
+    @srv.tool()
+    def get_pledge(query: str, as_of: str | None = None) -> dict:
+        """One company's promoter pledge from its shareholding filings: >25% pledged = strong caution, rising pledge = red flag (scoring.md)."""
+        with open_store() as st:
+            return tool_signal(st, "pledge", as_of, query)
+
+    @srv.tool()
+    def screen_disclosures(as_of: str | None = None) -> dict:
+        """Market-wide discovery: companies with insider clusters or size buying, and companies with pledge flags."""
+        with open_store() as st:
+            return tool_disclosure_screen(st, as_of)
 
     return srv
 

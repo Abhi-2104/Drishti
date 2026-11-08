@@ -100,7 +100,8 @@ def test_server_lists_and_calls_tools(st):
         out = await srv.call_tool("resolve_security", {"query": "RELIANCE"})
         return [t.name for t in tools], out
     names, out = asyncio.run(go())
-    assert sorted(names) == ["data_health", "insider_trades", "resolve_security"]
+    assert {"data_health", "insider_trades", "resolve_security", "get_macro_regime", "get_participant_oi", "get_sector_rotation",
+            "get_options_flow", "get_insider_cluster", "get_pledge", "screen_disclosures", "get_seasonality"} <= set(names)
     assert "INE002A01018" in json.dumps(out.model_dump(mode="json"), default=str)
 
 
@@ -136,3 +137,16 @@ def test_real_stdio_round_trip(tmp_path, monkeypatch):
                 return [t.name for t in tools.tools], res
     names, res = asyncio.run(asyncio.wait_for(go(), 60))
     assert "data_health" in names and "INE002A01018" in json.dumps(res.model_dump(mode="json"), default=str)
+
+
+def test_signal_tools(st):
+    r = m.tool_signal(st, "seasonality", "2026-11-08")
+    assert r["error"] is None and r["data"]["details"]["next_mpc"]["decision_date"] == "2026-12-04"
+    assert m.tool_signal(st, "macro_regime")["error"]["kind"] == "NOT_FOUND"            # UNKNOWN, explicitly
+    assert m.tool_signal(st, "nope")["error"]["kind"] == "NOT_FOUND"
+    assert m.tool_signal(st, "seasonality", "8 Nov")["error"]["kind"] == "PARSE_FAIL"
+    assert m.tool_signal(st, "pledge")["error"]["kind"] == "PARSE_FAIL"                 # needs a company
+    r = m.tool_signal(st, "insider_cluster", "2026-11-08", "RELIANCE")
+    assert r["error"] is None and r["data"]["details"]["isin"] == "INE002A01018"
+    assert m.tool_disclosure_screen(st, "2026-11-08")["error"] is None
+    json.dumps(r)

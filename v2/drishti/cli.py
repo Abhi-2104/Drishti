@@ -23,6 +23,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health", help="data freshness and the latest result of every job step")
     rv = sub.add_parser("resolve", help="look up a security by ISIN, NSE/BSE symbol or BSE scrip code")
     rv.add_argument("query")
+    bf = sub.add_parser("backfill", help="fill history: index_closes | participant_oi | fo_index | macro | insider | shp | all")
+    bf.add_argument("target")
+    bf.add_argument("--days", type=int, default=None, help="calendar days back (daily targets)")
+    bf.add_argument("--budget-min", type=float, default=60.0, help="stop cleanly after this many minutes; rerun to resume")
+    sg = sub.add_parser("signal", help="compute one signal now (or on --date), or --replay N weekdays of history")
+    sg.add_argument("name", help="e.g. macro_regime, participant_oi, sector_rotation, insider_cluster, pledge; 'list' to list")
+    sg.add_argument("--date", default=None, help="as-of date YYYY-MM-DD (default: today)")
+    sg.add_argument("--query", default=None, help="company for single-name signals: ISIN, symbol or BSE scrip code")
+    sg.add_argument("--replay", type=int, default=None, help="recompute for each of the last N weekdays and print a table")
+    sg.add_argument("--summary", action="store_true", help="with --replay: print only the distribution (label counts, score percentiles)")
     sub.add_parser("init", help="create the settings/profile templates (never overwrites)")
     sub.add_parser("paths", help="show where settings, profile and the database live")
     args = ap.parse_args(argv)
@@ -71,6 +81,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         serve(cfg.db_path)    # stdout belongs to the protocol: everything else logs to stderr
         return 0
+    if args.cmd in ("backfill", "signal"):
+        from .store import Store
+        try:
+            cfg = load_settings()
+        except ConfigError as e:
+            print(f"drishti {args.cmd}: {e}", file=sys.stderr)
+            return 2
+        with Store(cfg.db_path) as st:
+            return _backfill(st, args) if args.cmd == "backfill" else _signal(st, args)
     if args.cmd == "jobs":
         from .jobs import JOBS
         for j in JOBS.values():
@@ -100,6 +119,93 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{rep.job}: {sum(s.ok for s in rep.steps)}/{len(rep.steps)} steps ok")
         return 0 if rep.ok else 1
     return _todo(args.cmd)
+
+
+def _backfill(st, args) -> int:
+    import logging
+    from .jobs import backfill as bf
+    logging.getLogger("drishti").setLevel(logging.ERROR)   # holiday 404s are expected here; real failures are in the report below
+    targets = list(bf.TARGETS) if args.target == "all" else [args.target]
+    bad = [t for t in targets if t not in bf.TARGETS]
+    if bad:
+        print(f"drishti backfill: unknown target {bad[0]!r}; known: {', '.join(bf.TARGETS)}, all", file=sys.stderr)
+        return 2
+    worst = 0
+    for t in targets:
+        kw = {}
+        if t in bf.DEFAULT_DAYS:
+            kw["days"] = args.days or bf.DEFAULT_DAYS[t]
+        if t != "macro":
+            kw["budget_s"] = args.budget_min * 60
+        print(f"== backfill {t} {kw}", flush=True)
+        rep = bf.TARGETS[t](st, progress=lambda m: print(m, flush=True), **kw)
+        print(f"   {'OK  ' if rep.ok else 'FAIL'} done {rep.done}, skipped (already stored) {rep.skipped}, holidays {rep.holidays}, "
+              f"failed {len(rep.failed)}, rows {rep.rows}, range {rep.oldest} .. {rep.newest}")
+        if rep.stopped:
+            print(f"   stopped: {rep.stopped}")
+        for f in rep.failed[:8]:
+            print(f"   failed {f['date']}: {f['kind']} {f['detail'][:110]}")
+        worst = max(worst, 0 if rep.ok else 1)
+    return worst
+
+
+def _signal(st, args) -> int:
+    import json
+    from datetime import date, timedelta
+    from . import signals
+    from .resolve import resolve
+    if args.name == "list":
+        print("market:      " + ", ".join(signals.MARKET))
+        print("single-name: " + ", ".join(signals.SINGLE_NAME) + "  (need --query)")
+        return 0
+    on = date.fromisoformat(args.date) if args.date else date.today()
+    if args.replay:
+        if args.name not in signals.MARKET:
+            print("drishti signal: --replay works for market signals only", file=sys.stderr)
+            return 2
+        rows = signals.replay(st, args.name, on - timedelta(days=int(args.replay * 1.5) + 10), on)[-args.replay:]
+        if args.summary:
+            s = signals.summarise(rows)
+            print(f"{args.name}: {s['ok_days']} of {s['days']} trading days computed")
+            for lab, n in s["labels"].items():
+                print(f"  {n:>4}  ({n / max(1, s['ok_days']):.0%})  {lab[:90]}")
+            if s["score_p50"] is not None:
+                print(f"  score min {s['score_min']}  p10 {s['score_p10']}  median {s['score_p50']}  p90 {s['score_p90']}  max {s['score_max']}")
+            return 0
+        for r in rows:
+            score = "" if r["score"] is None else f"{r['score']:>8}"
+            print(f"{r['as_of'] or r['date']}  {'ok  ' if r['ok'] else '--  '} {score:>8}  {r['label'][:100]}")
+        return 0
+    kw = {}
+    if args.name in signals.SINGLE_NAME:
+        if not args.query:
+            print("drishti signal: single-name signals need --query", file=sys.stderr)
+            return 2
+        rr = resolve(st, args.query)
+        if not rr.ok or rr.data["ambiguous"]:
+            print(f"drishti signal: cannot resolve {args.query!r}: {rr.error.detail if not rr.ok else 'several companies match'}", file=sys.stderr)
+            return 2
+        m = rr.data["matches"][0]
+        kw = {"isin": m["isin"]} if args.name == "pledge" else {"isin": m["isin"], "symbol": m["nse_symbol"]}
+    try:
+        r = signals.compute(st, args.name, on, **kw)
+    except KeyError:
+        print(f"drishti signal: unknown signal {args.name!r}; try `drishti signal list`", file=sys.stderr)
+        return 2
+    if not r.ok:
+        print(f"{r.error.kind}: {r.error.detail}", file=sys.stderr)
+        return 1
+    s = r.data
+    print(f"{s['name']}  as of {s['as_of']}  score {s['score']}  ->  {s['label']}" + ("   [provisional thresholds]" if s["provisional"] else ""))
+    for c in s["components"]:
+        val = json.dumps(c["value"], default=str) if isinstance(c["value"], (list, dict)) else c["value"]
+        contrib = "" if c["contribution"] is None else f" [{c['contribution']:+}]"
+        print(f"  - {c['input']}: {val}{contrib}  {c['text'] or c['rule']}")
+    for m in s["missing"]:
+        print(f"  ! missing: {m}")
+    print(f"  note: {s['note']}")
+    print(f"  params: {s['params_version']}")
+    return 0
 
 
 def _print_health(h: dict) -> int:

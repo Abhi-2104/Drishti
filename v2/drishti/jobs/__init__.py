@@ -16,7 +16,10 @@ from typing import Callable
 from ..core.canary import IST
 from ..core.envelope import DrishtiError, ErrorKind, Result
 from ..providers import _util as u
-from ..providers import cftc, fred, nse_archive, nse_flows, nse_pit, nse_shp, security_master
+from .. import signals
+from ..providers import cftc, fred, nse_archive, nse_flows, nse_pit, nse_shp, security_master, yahoo
+from ..signals import disclosure
+from ..store import datasets as ds
 from ..providers import bse as bse_provider
 from ..store import Store
 
@@ -97,23 +100,59 @@ def _insider_persist(store: Store, res: Result) -> int:
     return store.upsert("insider_event", rows, ("event_key",))
 
 
+def _p(fn):
+    return lambda store, res: fn(store, res.data)
+
+
+def _fred(sid: str) -> Step:
+    return Step(f"fred_{sid}", lambda s, t: fred.fred_series(sid, store=s, today=t), count=lambda r: r.data["n_total"])
+
+
+def _yahoo(sym: str) -> Step:
+    return Step(f"yahoo_{sym}", lambda s, t: yahoo.daily(sym, rng="1mo", store=s, today=t))
+
+
+def _signal_step(name: str) -> Step:
+    def persist(store, res):
+        store.set_signal(name, res.as_of, res.data)
+        return 1
+    return Step(f"signal_{name}", lambda s, t: signals.compute(s, name), persist=persist, count=lambda r: 1)
+
+
+def _screen_step() -> Step:
+    def run(store, today):
+        data = disclosure.screen(store, today)
+        return Result(data=data, as_of=data["as_of"])
+
+    def persist(store, res):
+        store.set_signal("disclosure_screen", res.as_of, res.data)
+        return 1
+    return Step("signal_disclosure_screen", run, persist=persist, count=lambda r: len(r.data["insider"]) + len(r.data["pledge"]))
+
+
+DAILY_FRED = ("DTWEXBGS", "DGS10", "DCOILBRENTEU", "DEXINUS", "VIXCLS", "BAMLH0A0HYM2", "T10Y2Y")
+WEEKLY_FRED = ("WALCL", "M2SL")
+
 STEPS = {
     "cm_bhavcopy": Step("cm_bhavcopy", _latest(nse_archive.cm_bhavcopy), daily=True),
-    "fo_bhavcopy": Step("fo_bhavcopy", _latest(nse_archive.fo_bhavcopy), daily=True),
+    "fo_bhavcopy": Step("fo_bhavcopy", _latest(nse_archive.fo_bhavcopy), persist=_p(ds.persist_fo_index), daily=True),
     "bse_bhavcopy": Step("bse_bhavcopy", _latest(bse_provider.bhavcopy), daily=True),
-    "participant_oi": Step("participant_oi", _latest(nse_archive.participant_oi), daily=True),
-    "index_closes": Step("index_closes", _latest(nse_archive.index_closes), daily=True),
+    "participant_oi": Step("participant_oi", _latest(nse_archive.participant_oi), persist=_p(ds.persist_participant_oi), daily=True),
+    "index_closes": Step("index_closes", _latest(nse_archive.index_closes), persist=_p(ds.persist_index_closes), daily=True),
     "fo_ban_list": Step("fo_ban_list", _latest(nse_archive.fo_ban_list), daily=True),
     "bulk_deals": Step("bulk_deals", lambda s, t: nse_archive.bulk_deals(store=s)),
     "block_deals": Step("block_deals", lambda s, t: nse_archive.block_deals(store=s)),
-    "fii_dii_cash": Step("fii_dii_cash", lambda s, t: nse_flows.fii_dii_cash(store=s, today=t), count=lambda r: 2),
-    "fred_DTWEXBGS": Step("fred_DTWEXBGS", lambda s, t: fred.fred_series("DTWEXBGS", store=s, today=t), count=lambda r: r.data["n_total"]),
-    "fred_WALCL": Step("fred_WALCL", lambda s, t: fred.fred_series("WALCL", store=s, today=t), count=lambda r: r.data["n_total"]),
-    "cftc_tff": Step("cftc_tff", lambda s, t: cftc.cftc_tff(store=s, today=t)),
+    "fii_dii_cash": Step("fii_dii_cash", lambda s, t: nse_flows.fii_dii_cash(store=s, today=t), persist=_p(ds.persist_fii_dii),
+                         count=lambda r: 2),
+    **{f"fred_{x}": _fred(x) for x in DAILY_FRED + WEEKLY_FRED},
+    **{f"yahoo_{x}": _yahoo(x) for x in yahoo.SYMBOLS},
+    "cftc_tff": Step("cftc_tff", lambda s, t: cftc.cftc_tff(store=s, today=t), persist=_p(ds.persist_cftc)),
     "shp_master": Step("shp_master", lambda s, t: nse_shp.shp_master(store=s, today=t)),
     "security_master": Step("security_master", lambda s, t: security_master.build_security_master(s, today=t),
                             count=lambda r: r.data["securities"]),
     "insider_trades": Step("insider_trades", _insider_run, persist=_insider_persist, count=lambda r: len(r.data["events"])),
+    **{f"signal_{n}": _signal_step(n) for n in signals.MARKET},
+    "signal_disclosure_screen": _screen_step(),
 }
 
 JOBS: dict[str, Job] = {j.name: j for j in (
@@ -123,10 +162,14 @@ JOBS: dict[str, Job] = {j.name: j for j in (
         tuple(STEPS[k] for k in ("participant_oi", "fo_ban_list", "index_closes", "bulk_deals", "block_deals", "fii_dii_cash"))),
     Job("insider", "07:30 and 20:30", "SEBI insider-trading disclosures, last 7 days (downloads only filings not yet stored)",
         (STEPS["insider_trades"],)),
-    Job("macro_weekly", "Sat 10:00", "FRED dollar index and Fed balance sheet, CFTC positioning",
-        tuple(STEPS[k] for k in ("fred_DTWEXBGS", "fred_WALCL", "cftc_tff"))),
+    Job("macro_daily", "07:15", "Regime inputs: Yahoo DXY/US10Y/Brent/USD-INR/VIX and FRED daily series",
+        tuple(STEPS[f"yahoo_{x}"] for x in yahoo.SYMBOLS) + tuple(STEPS[f"fred_{x}"] for x in DAILY_FRED)),
+    Job("macro_weekly", "Sat 10:00", "Fed balance sheet, US M2, CFTC positioning",
+        tuple(STEPS[f"fred_{x}"] for x in WEEKLY_FRED) + (STEPS["cftc_tff"],)),
     Job("shp_master", "07:45", "Shareholding-pattern master: promoter holding per company with QoQ change", (STEPS["shp_master"],)),
     Job("security_master", "Sun 10:00", "ISIN master joining NSE and BSE listings", (STEPS["security_master"],)),
+    Job("signals_daily", "20:00", "Compute every market signal and the disclosure screen from stored data (run after the data jobs)",
+        tuple(STEPS[f"signal_{n}"] for n in signals.MARKET) + (STEPS["signal_disclosure_screen"],)),
 )}
 
 
