@@ -37,7 +37,8 @@ def replay(store, name: str, start: date, end: date) -> list[dict]:
     out, d, seen = [], start, set()
     while d <= end:
         if d.weekday() < 5:
-            r = compute(store, name, d)
+            # the percentile line re-scores ~250 past sessions; a replay only needs the score itself
+            r = market.participant_oi(store, d, with_history=False) if name == "participant_oi" else compute(store, name, d)
             if r.ok and r.as_of in seen:      # no new data that day (exchange holiday): the same reading, not a new one
                 d += timedelta(days=1)
                 continue

@@ -215,7 +215,7 @@ def chain(d="2026-11-06", exp="2026-11-11"):
 def test_options_flow_pcr_max_pain_walls(st):
     ds.persist_fo_index(st, chain() + chain(exp="2026-11-25"))
     s = flows.options_flow(st, date(2026, 11, 6), "NIFTY").data
-    assert s["score"] == round(2450 / 3000, 3) and s["label"].startswith("balanced") and s["provisional"]
+    assert s["score"] == round(2450 / 3000, 3) and s["label"] == "balanced" and s["provisional"]
     # max pain by hand: payout at 25000 = calls 100*200 + 300*100 + puts 700*100 + 900*200 = 300000 (the minimum here)
     assert flows.max_pain(chain()) == 25000.0
     d = s["details"]
@@ -304,7 +304,7 @@ def test_every_market_signal_returns_a_typed_result_on_an_empty_store(st):
 
 def test_params_have_sources_and_version():
     p, v = params("macro_regime")
-    assert p["dxy_bearish_above"] == 104.0 and v.startswith("2026-11-08.1+")
+    assert p["dxy_bearish_above"] == 104.0 and v.startswith("2026-11-08.") and "+" in v
 
 
 def test_replay_over_history(st):
@@ -320,6 +320,7 @@ def test_yahoo_provider_stores_closes_for_the_regime(st, monkeypatch):
     from drishti.core.fetch import Fetched
     body = (FIX / "yahoo" / "nsei_6mo.json").read_bytes()
     monkeypatch.setattr(yahoo, "get", lambda url, profile, expect="json", **k: Fetched(url, body, 200))
+    put_macro(st, "yahoo:^NSEI", [("2026-11-08", 1.0), ("2026-11-07", 1.0)])     # bad bars stored by an earlier run
     r = yahoo.daily("^NSEI", rng="6mo", store=st, today=date(2026, 11, 8))
     assert r.ok and r.as_of == "2026-11-06"
     pts = st.query("SELECT obs_date, value FROM macro_series WHERE series='yahoo:^NSEI' ORDER BY obs_date DESC LIMIT 1")
@@ -335,11 +336,19 @@ def test_macro_cross_check_flags_disagreement(st):
     put_macro(st, "yahoo:^TNX", [("2026-11-06", 4.86)])
     put_macro(st, "fred:DGS10", [("2026-11-05", 4.83)])                 # agrees within 0.10
     put_macro(st, "yahoo:BZ=F", [("2026-11-06", 98.3)])
-    put_macro(st, "fred:DCOILBRENTEU", [("2026-11-03", 80.0)])          # $18 apart: flagged, not averaged
+    put_macro(st, "fred:DCOILBRENTEU", [("2026-11-03", 80.0)])
     s = market.macro_regime(st, date(2026, 11, 7)).data
     ch = {c["input"]: c for c in s["details"]["cross_checks"]}
-    assert ch["US_10Y"]["agrees"] and not ch["Brent_Crude"]["agrees"]
-    assert any("source disagreement on Brent_Crude" in m for m in s["missing"])
+    assert ch["US_10Y"]["agrees"] is True if "US_10Y" in ch else True
+    assert "Brent_Crude" not in ch           # FRED's Brent is dated 3 Nov and Yahoo has no 3 Nov bar here: no like-for-like compare
+    put_macro(st, "yahoo:BZ=F", [("2026-11-03", 98.0)])               # now both sources have 3 Nov: $18 apart -> flagged, not averaged
+    s = market.macro_regime(st, date(2026, 11, 7)).data
+    ch = {c["input"]: c for c in s["details"]["cross_checks"]}
+    assert not ch["Brent_Crude"]["agrees"] and ch["Brent_Crude"]["date"] == "2026-11-03"
+    assert any("source disagreement on Brent_Crude on 2026-11-03" in m for m in s["missing"])
+    put_macro(st, "yahoo:^TNX", [("2026-11-05", 4.84)])
+    s = market.macro_regime(st, date(2026, 11, 7)).data
+    assert {c["input"]: c for c in s["details"]["cross_checks"]}["US_10Y"]["agrees"]
 
 
 def test_replay_skips_holidays_and_summarises(st):
@@ -349,3 +358,22 @@ def test_replay_skips_holidays_and_summarises(st):
     assert [r["as_of"] for r in rows] == ["2026-10-01", "2026-10-05"]
     s = signals.summarise(rows)
     assert s["ok_days"] == 2 and sum(s["labels"].values()) == 2
+
+
+def test_client_contribution_is_negative_and_percentile_needs_history(st):
+    rows = []
+    for i, d in enumerate(weekdays(date(2026, 11, 6), 30)):
+        k = 100 + i * 10        # FII grows steadily more long: today is the most bullish reading of the window
+        rows += [oi_row(d, "FII", k, 0, 0, 0, 0, 0), oi_row(d, "Pro", 0, 0, 0, 0, 0, 0), oi_row(d, "Client", 0, k, 0, 0, 0, 0),
+                 oi_row(d, "DII", 0, 0, 0, 0, 0, 0)]
+    ds.persist_participant_oi(st, rows)
+    s = market.participant_oi(st, date(2026, 11, 6)).data
+    c = {x["input"]: x for x in s["components"]}
+    assert c["Client"]["contribution"] == -c["Client"]["value"]
+    assert s["details"]["history_sessions"] == 29 and s["details"]["percentile"] == 100.0
+
+
+def test_yahoo_drops_live_and_weekend_bars():
+    rows = [{"date": "2026-11-06", "close": 1.0}, {"date": "2026-11-07", "close": 1.0}, {"date": "2026-11-08", "close": 1.0}]
+    assert [r["date"] for r in yahoo.complete_bars(rows, date(2026, 11, 8))] == ["2026-11-06"]
+    assert [r["date"] for r in yahoo.complete_bars(rows[:1], date(2026, 11, 6))] == []      # today's bar may still be live

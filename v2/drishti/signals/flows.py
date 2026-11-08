@@ -61,6 +61,26 @@ def max_pain(chain: list[dict]) -> float | None:
     return min(pain, key=lambda k: (pain[k], k))
 
 
+def _pcr_near(rows: list[dict], d: str) -> float | None:
+    exp = sorted({r["expiry"] for r in rows if r["expiry"] >= d})
+    if not exp:
+        return None
+    near = [r for r in rows if r["expiry"] == exp[0]]
+    ce = sum(r["oi"] or 0 for r in near if r["option_type"] == "CE")
+    pe = sum(r["oi"] or 0 for r in near if r["option_type"] == "PE")
+    return pe / ce if ce and pe else None
+
+
+def pcr_history(store, symbol: str, before: str, n: int = 250) -> list[float]:
+    rows = store.query("SELECT trade_date, expiry, option_type, SUM(oi) AS oi FROM index_option_eod WHERE symbol=? AND trade_date < ? "
+                       "AND trade_date >= date(?, '-400 days') GROUP BY trade_date, expiry, option_type", (symbol, before, before))
+    by: dict[str, list] = {}
+    for r in rows:
+        by.setdefault(r["trade_date"], []).append(r)
+    out = [x for d in sorted(by)[-n:] if (x := _pcr_near(by[d], d)) is not None]
+    return out
+
+
 def options_flow(store, on=None, symbol: str = "NIFTY"):
     p, ver = params("options_flow")
     d, rows = h.option_chain(store, symbol, on)
@@ -82,20 +102,19 @@ def options_flow(store, on=None, symbol: str = "NIFTY"):
     top = lambda t: sorted((r for r in near if r["option_type"] == t), key=lambda r: -(r["oi"] or 0))[:p["walls"]]  # noqa: E731
     walls_ce = [{"strike": r["strike"], "oi": r["oi"], "oi_change": r["oi_change"]} for r in top("CE")]
     walls_pe = [{"strike": r["strike"], "oi": r["oi"], "oi_change": r["oi_change"]} for r in top("PE")]
-    if pcr > p["pcr_bullish_above"]:
-        label = f"put-heavy (PCR {pcr})"
-    elif pcr < p["pcr_bearish_below"]:
-        label = f"call-heavy (PCR {pcr})"
-    else:
-        label = f"balanced (PCR {pcr})"
+    label = "put-heavy" if pcr > p["pcr_bullish_above"] else "call-heavy" if pcr < p["pcr_bearish_below"] else "balanced"
+    from .market import percentile_of
+    hist = pcr_history(store, symbol, d)
+    pctl = percentile_of(pcr, hist)
     comps = [Component("PCR (nearest expiry, OI)", pcr, d, f">{p['pcr_bullish_above']} put-heavy, <{p['pcr_bearish_below']} call-heavy (provisional)"),
+             Component("PCR percentile vs own history", pctl, d, f"share of the last {len(hist)} sessions at or below today"),
              Component("PCR (all expiries, OI)", pcr_all, d), Component("max pain", mp, d, "nearest expiry"),
              Component("underlying", spot, d), Component("call OI walls (resistance)", [w["strike"] for w in walls_ce], d),
              Component("put OI walls (support)", [w["strike"] for w in walls_pe], d)]
     return ok(Signal(f"options_flow:{symbol}", d, pcr, label, comps, [],
                      f"From the NSE EOD F&O bhavcopy; nearest expiry {expiries[0]}. PCR thresholds are a common convention, not yet "
                      "your brother's v0 numbers.", ver, provisional=bool(p.get("provisional", True)),
-                     details={"expiry": expiries[0], "expiries": expiries[:4], "call_walls": walls_ce, "put_walls": walls_pe,
+                     details={"expiry": expiries[0], "expiries": expiries[:4], "pcr_percentile": pctl, "call_walls": walls_ce, "put_walls": walls_pe,
                               "max_pain_vs_spot_pct": round((mp - spot) / spot * 100, 2) if mp and spot else None}))
 
 

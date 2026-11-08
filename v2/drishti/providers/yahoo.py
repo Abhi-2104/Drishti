@@ -61,6 +61,13 @@ def parse_chart(body: bytes, symbol: str, *, min_rows: int = 5) -> list[dict]:
     return out
 
 
+def complete_bars(rows: list[dict], today: date) -> list[dict]:
+    """Drop a bar dated today (the session may still be live) and weekend bars (live run 8 Nov: INR=X carried a Sunday
+    bar whose 'move' was a partial weekend quote)."""
+    t = today.isoformat()
+    return [r for r in rows if r["date"] < t and date.fromisoformat(r["date"]).weekday() < 5]
+
+
 @guard
 def daily(symbol: str, *, rng: str = "6mo", today: date | None = None, max_age_days: int | None = None, store=None) -> Result:
     if rng not in _RANGES:
@@ -70,9 +77,10 @@ def daily(symbol: str, *, rng: str = "6mo", today: date | None = None, max_age_d
             raise DrishtiError(ErrorKind.NOT_IMPLEMENTED, f"yahoo: {symbol} has no freshness window; pass max_age_days")
         max_age_days = SYMBOLS[symbol]
     got = get(URL.format(sym=quote(symbol, safe=""), rng=rng), YAHOO, expect="json")
-    rows = parse_chart(got.body, symbol)
+    rows = complete_bars(parse_chart(got.body, symbol), today or today_ist())
     newest = check_fresh(rows, "date", max_age_days, f"yahoo_{symbol}", today=today or today_ist())
     if store is not None:
-        from ..store.datasets import persist_macro
+        from ..store.datasets import persist_macro, prune_incomplete
+        prune_incomplete(store, f"yahoo:{symbol}", (today or today_ist()).isoformat())
         persist_macro(store, f"yahoo:{symbol}", [{"date": r["date"], "value": r["close"]} for r in rows], SOURCE)
     return Result(data=rows, as_of=newest.isoformat(), sources=[got.source(SOURCE)])

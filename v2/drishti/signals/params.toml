@@ -7,7 +7,7 @@
 #   provisional    not yet decided by you or your brother; a placeholder with the stated rationale. Outputs using these
 #                  carry provisional=true so nobody mistakes them for calibrated thresholds.
 
-version = "2026-11-08.1"
+version = "2026-11-08.2"
 
 [macro_regime]                      # source: v1:macroRegime.ts ("calibration-sensitive heuristics, medium confidence")
 dxy_bearish_above = 104.0
@@ -26,6 +26,8 @@ max_input_age_days = 5              # an input older than this vs the as-of date
 [participant_oi]                    # source: v1:participantOi.ts (Sensibull logic)
 strong_threshold = 4                # |(FII+Pro) - Client| >= this = strong divergence
 segments = ["Index Futures", "Call Options", "Put Options"]
+history_sessions = 250              # added 8 Nov: percentile of today's score vs its own past. Context only; the v1 score and
+                                    # threshold are unchanged (replay: "strong bearish" on 85% of 240 sessions at +/-4)
 
 [sector_rotation]                   # source: v1:sectorRotation.ts
 benchmark = "Nifty 50"

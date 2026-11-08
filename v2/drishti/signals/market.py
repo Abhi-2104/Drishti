@@ -30,7 +30,14 @@ def _label(net: float, change: float, seg: str) -> tuple[str, str]:
     return "Mild Bearish", "bear-mild"
 
 
-def participant_oi(store, on=None):
+def percentile_of(value: float, history: list[float]) -> float | None:
+    """Share of past readings at or below `value` (0..100). None with fewer than 20 past readings."""
+    if value is None or len(history) < 20:
+        return None
+    return round(100 * sum(1 for x in history if x <= value) / len(history), 1)
+
+
+def participant_oi(store, on=None, *, with_history: bool = True):
     p, ver = params("participant_oi")
     days = h.participant_days(store, on, 2)
     if not days:
@@ -51,7 +58,8 @@ def participant_oi(store, on=None):
             total += _SCORE[cls]
             stance[who].append({"segment": seg, "net": net, "change": change, "label": lab})
         scores[who] = total
-        comps.append(Component(who, total, d0, "sum of 3 segments, each -2..+2", total if who != "DII" else 0,
+        comps.append(Component(who, total, d0, "sum of 3 segments, each -2..+2",
+                               0 if who == "DII" else (-total if who == "Client" else total),
                                "; ".join(f"{s['segment']}: {s['label']}" for s in stance[who])))
     smart = (scores["FII"] + scores["Pro"]) - scores["Client"]
     thr = p["strong_threshold"]
@@ -64,11 +72,21 @@ def participant_oi(store, on=None):
     else:
         interp = f"No strong smart-money vs retail divergence (score {smart})."
         label = "no strong divergence"
+    pctl, hist_n = None, 0
+    if with_history:   # where today sits in its own past: the read that discriminates when the raw score is persistently one-sided
+        past = [r["trade_date"] for r in store.query("SELECT DISTINCT trade_date FROM participant_oi WHERE trade_date < ? "
+                                                    "ORDER BY trade_date DESC LIMIT ?", (d0, p.get("history_sessions", 250)))]
+        hist = [x.data["score"] for x in (participant_oi(store, d, with_history=False) for d in past) if x.ok]
+        hist_n = len(hist)
+        pctl = percentile_of(smart, hist)
+        comps.append(Component("percentile vs own history", pctl, d0, f"share of the last {hist_n} sessions at or below today's score", None,
+                               "unknown (under 20 sessions stored)" if pctl is None else
+                               f"today's {smart} is at the {pctl:.0f}th percentile (low = more bearish than usual)"))
     return ok(Signal("participant_oi", d0, smart, label, comps, missing,
                      "FII/Pro = smart money (usually right); Client = retail (contrarian); DII ignored for F&O direction. "
                      "Change vs prior trading day. Score = (FII + Pro) - Client, range -18..+18.",
                      ver, details={"interpretation": interp, "participant_scores": scores, "stance": stance,
-                                   "prior_date": prior[0] if prior else None}))
+                                   "prior_date": prior[0] if prior else None, "percentile": pctl, "history_sessions": hist_n}))
 
 
 # --- sector rotation (v1: sectorRotation.ts) ------------------------------------------------------------
@@ -179,12 +197,14 @@ def cross_check(store, ind: dict) -> list[dict]:
         x = ind.get(k)
         if not x:
             continue
-        ref = h.macro_on_or_before(store, series, x["as_of"])
+        ref = h.macro_on_or_before(store, series, x["as_of"])          # FRED lags: its newest point on or before the Yahoo date
         if not ref:
             continue
-        gap = round(x["value"] - ref[1], 4)
-        out.append({"input": k, "yahoo": x["value"], "yahoo_date": x["as_of"], "fred": ref[1], "fred_date": ref[0], "gap": gap,
-                    "unit": unit, "agrees": abs(gap) <= tol, "same_day": ref[0] == x["as_of"]})
+        mine = h.macro_on_or_before(store, MACRO_INPUTS[k], ref[0])    # Yahoo on that same date: compare like with like
+        if not mine or mine[0] != ref[0]:
+            continue
+        gap = round(mine[1] - ref[1], 4)
+        out.append({"input": k, "date": ref[0], "yahoo": mine[1], "fred": ref[1], "gap": gap, "unit": unit, "agrees": abs(gap) <= tol})
     return out
 
 
@@ -243,7 +263,7 @@ def macro_regime(store, on=None):
     checks = cross_check(store, ind)
     disagree = [c for c in checks if not c["agrees"]]
     for c in disagree:
-        missing.append(f"source disagreement on {c['input']}: Yahoo {c['yahoo']} ({c['yahoo_date']}) vs FRED {c['fred']} ({c['fred_date']})")
+        missing.append(f"source disagreement on {c['input']} on {c['date']}: Yahoo {c['yahoo']} vs FRED {c['fred']} (gap {c['gap']} {c['unit']})")
     as_of = max(x["as_of"] for x in ind.values() if x)
     label = "bullish backdrop" if score >= 2 else "bearish backdrop" if score <= -2 else "neutral backdrop"
     return ok(Signal("macro_regime", as_of, score, label, comps, missing,

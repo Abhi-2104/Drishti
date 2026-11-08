@@ -104,6 +104,12 @@ def persist_macro(store, series: str, rows: Iterable[dict], source: str) -> int:
                         ("series", "obs_date"))
 
 
+def prune_incomplete(store, series: str, today: str) -> None:
+    """Remove bars of a market series dated today or on a weekend (an unfinished or weekend quote, never a session close)."""
+    ensure(store, "macro_series")
+    store._run("DELETE FROM macro_series WHERE series=? AND (obs_date >= ? OR strftime('%w', obs_date) IN ('0', '6'))", (series, today))
+
+
 def persist_cftc(store, rows: Iterable[dict]) -> int:
     ensure(store, "cftc_tff")
     return store.upsert("cftc_tff", [{
