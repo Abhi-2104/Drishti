@@ -70,23 +70,29 @@ def run_rules(store, cases: list[dict]) -> dict:
     return n
 
 
-def export_bundles(store, cases: list[dict], out_dir: Path, *, blind: bool = True, profile=None) -> dict:
+def export_bundles(store, cases: list[dict], out_dir: Path, *, blind: bool = True, masked: bool = False, profile=None) -> dict:
     """One JSON evidence file per case (named by case_id; with blind=True the file names the case by number only) and a
     key file mapping the number back to the case. Agents get the bundles and never the key."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if masked and not blind:
+        raise ValueError("masked bundles must also be blind")
     key, bad = {}, []
     for i, c in enumerate(cases, 1):
+        if masked and log.GATES[c["gate"]][0] != "stock":
+            bad.append({"case_id": c["case_id"], "why": "masked mode is for stock gates only (a market move is recognisable even masked)"})
+            continue
         r = gather.gather(store, c["gate"], c["as_of"], isin=c["isin"], blind=blind, profile=profile, horizon_days=c.get("horizon_days"))
         if not r.ok:
             bad.append({"case_id": c["case_id"], "why": r.error.detail[:160]})
             continue
+        data = gather.mask(r.data) if masked else r.data
         cid = f"case-{i:05d}" if blind else c["case_id"]
-        (out_dir / f"{cid}.json").write_text(json.dumps({"case_id": cid, **r.data}, indent=1, default=str), encoding="utf-8")
-        key[cid] = {**c, "bundle_sha": r.data["bundle_sha"]}
+        (out_dir / f"{cid}.json").write_text(json.dumps({"case_id": cid, **data}, indent=1, default=str), encoding="utf-8")
+        key[cid] = {**c, "bundle_sha": data["bundle_sha"]}
     key_path = key_file(out_dir)
     key_path.write_text(json.dumps(key, indent=1), encoding="utf-8")
-    return {"written": len(key), "failed": bad[:20], "failed_count": len(bad), "blind": blind, "key": str(key_path)}
+    return {"written": len(key), "failed": bad[:20], "failed_count": len(bad), "blind": blind, "masked": masked, "key": str(key_path)}
 
 
 def key_file(out_dir: Path) -> Path:

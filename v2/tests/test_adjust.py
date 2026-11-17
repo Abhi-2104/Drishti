@@ -79,7 +79,7 @@ def test_expected_factor_from_wording(kind, subject, want):
     assert ds.expected_factor(kind, subject) == pytest.approx(want)
 
 
-@pytest.mark.parametrize("kind,subject", [("split", "Split"), ("bonus", "Bonus"), ("split", "Bonus 1:1 and Split From Rs 10/- To Rs 2/-"),
+@pytest.mark.parametrize("kind,subject", [("split", "Split"), ("bonus", "Bonus"), ("bonus", "Bonus 1 Debenture For 1 Equity Share"),
                                           ("bonus", "Bonus 0:0"), ("dividend", "Dividend - Rs 5 Per Share"), ("rights", "Rights 3:8 @ Premium Re 0.50/-")])
 def test_unreadable_or_unadjusted_wording_gives_no_factor(kind, subject):
     assert ds.expected_factor(kind, subject) is None
@@ -317,3 +317,10 @@ def test_index_valuation_places_pe_in_its_own_history(st):
     assert not r.data["provisional"] and any("Midcap 150: no PE" in m for m in r.data["missing"])
     short = market.index_valuation(st, on=days[100])
     assert short.data["provisional"] and "less than a year" in " ".join(short.data["missing"])
+
+
+def test_one_line_bonus_plus_split_is_the_product_and_debenture_bonus_is_not_equity():
+    f = ds.expected_factor("bonus", "Bonus 1:1/Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share")
+    assert f == pytest.approx(0.1)                       # Bajaj Finance, Sep 2016: ~10,700 -> ~1,070
+    assert ds.expected_factor("split", "Bonus 1:2/Face Value Split (Sub-Division) From Rs 2/- Per Share To Re 1/- Per Share") == pytest.approx(1 / 3)
+    assert ds.expected_factor("bonus", "Scheme Of Arangement- Bonus - 1 Debenture For 1 Equity Share Held") is None

@@ -13,6 +13,9 @@ from typing import Iterable
 INDEX_OPTION_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50")
 
 DDL = {
+    "bse_scrip_isin": """
+CREATE TABLE IF NOT EXISTS bse_scrip_isin (
+    scrip_code TEXT NOT NULL, isin TEXT NOT NULL, first_date TEXT NOT NULL, last_date TEXT NOT NULL, PRIMARY KEY (scrip_code, isin))""",
     "price_eod": """
 CREATE TABLE IF NOT EXISTS price_eod (
     trade_date TEXT NOT NULL, isin TEXT NOT NULL, exchange TEXT NOT NULL, series TEXT NOT NULL, symbol TEXT,
@@ -324,6 +327,31 @@ def persist_prices(store, rows, exchange: str) -> int:
     return store.upsert("price_eod", out, ("trade_date", "isin", "exchange", "series")) if out else 0
 
 
+def record_bse_scrips(store, rows) -> int:
+    """Remember which ISIN each BSE scrip code carried on each day, so the oldest BSE files (no ISIN column) can be mapped."""
+    ensure(store, "bse_scrip_isin")
+    pairs = {(r["scrip_code"], r["isin"], r["trade_date"]) for r in rows if r.get("scrip_code") and r.get("isin")}
+    sql = ("INSERT INTO bse_scrip_isin (scrip_code, isin, first_date, last_date) VALUES (?, ?, ?, ?) "
+           "ON CONFLICT (scrip_code, isin) DO UPDATE SET first_date=MIN(first_date, excluded.first_date), "
+           "last_date=MAX(last_date, excluded.last_date)")
+    with store._lock:
+        store._db.executemany(sql, [(c, i, d, d) for c, i, d in pairs])
+        store._db.commit()
+    return len(pairs)
+
+
+def bse_isin_map(store) -> dict[str, str]:
+    """Scrip code -> the ISIN it carried earliest in the stored files (the nearest one for a backfill walking back in time),
+    falling back to the security master's current mapping for codes never seen in a file."""
+    ensure(store, "bse_scrip_isin")
+    out = {r["bse_scrip"]: r["isin"] for r in store.query("SELECT bse_scrip, isin FROM security WHERE bse_scrip IS NOT NULL")} \
+        if store.query("SELECT name FROM sqlite_master WHERE type='table' AND name='security'") else {}
+    for r in store.query("SELECT scrip_code, isin FROM bse_scrip_isin s WHERE first_date = "
+                         "(SELECT MIN(first_date) FROM bse_scrip_isin t WHERE t.scrip_code = s.scrip_code)"):
+        out[r["scrip_code"]] = r["isin"]
+    return out
+
+
 def persist_delivery(store, rows) -> int:
     """NSE delivery rows, each tagged with its ISIN from the same session's stored prices (symbol + series), falling back to the
     security master. A row that cannot be resolved is stored with ISIN NULL (and counted by `unresolved_delivery`), never dropped."""
@@ -552,7 +580,15 @@ _BONUS = re.compile(r"bonus\D{0,30}?(\d+)\s*:\s*(\d+)", re.I)
 def expected_factor(kind: str, subject: str) -> float | None:
     """The price factor a split / bonus implies, from the action's wording; None when the wording cannot be read."""
     s = " ".join((subject or "").split())
+    if re.search(r"debenture|preference|warrant", s, re.I):
+        return None                                   # a bonus in another instrument: no equity price step to expect
     ft, bo = _FROM_TO.search(s), _BONUS.search(s)
+    if kind in ("split", "bonus") and ft and bo:      # one action line announcing both ("Bonus 1:1/Face Value Split ... To Rs 2")
+        old, new = float(ft.group(1)), float(ft.group(2))
+        b_new, held = int(bo.group(1)), int(bo.group(2))
+        if old > 0 and new > 0 and b_new > 0 and held > 0:
+            return round(new / old * held / (b_new + held), 8)
+        return None
     if kind == "split" and ft and not bo:
         old, new = float(ft.group(1)), float(ft.group(2))
         return round(new / old, 8) if old > 0 and new > 0 else None
@@ -676,22 +712,29 @@ def _verify_combined(rows: list[dict]) -> None:
 
 
 def _price_successions(store, lo: str) -> list[dict]:
-    """ISIN changes seen in the price table itself: the same symbol, consecutive sessions, the old ISIN never trades again
-    and the new one never traded before. Catches ISIN changes with no stored action (older history, other corporate events)."""
-    cand = store.query("""
-        WITH d AS (SELECT DISTINCT exchange, symbol, isin, trade_date FROM price_eod WHERE symbol IS NOT NULL AND trade_date >= ?),
-             s AS (SELECT exchange, symbol, isin, trade_date, LAG(isin) OVER w AS prev_isin, LAG(trade_date) OVER w AS prev_date
-                   FROM d WINDOW w AS (PARTITION BY exchange, symbol ORDER BY trade_date, isin))
-        SELECT exchange, symbol, prev_isin, isin, trade_date, prev_date FROM s WHERE prev_isin IS NOT NULL AND prev_isin <> isin""", (lo,))
+    """ISIN changes seen in the price table itself: the same symbol, the old ISIN never trades again and the new one never
+    traded before, with the last old session and the first new one at most SUCC_MAX_GAP_DAYS apart. Catches ISIN changes with no
+    stored action (older history, other corporate events). One grouped pass over the table: each (symbol, ISIN) becomes a span
+    [first, last]; consecutive non-overlapping spans of one symbol are a succession. Overlapping spans (two instruments trading
+    together under one symbol) never are."""
+    spans: dict[tuple, list[dict]] = {}
+    for r in store.query("SELECT exchange, symbol, isin, MIN(trade_date) first, MAX(trade_date) last FROM price_eod "
+                         "WHERE symbol IS NOT NULL GROUP BY exchange, symbol, isin"):
+        spans.setdefault((r["exchange"], r["symbol"]), []).append(r)
     out = []
-    for c in cand:
-        if _days(c["trade_date"], c["prev_date"]) > SUCC_MAX_GAP_DAYS:
+    for (exchange, symbol), g in spans.items():
+        if len(g) < 2:
             continue
-        old_last = store.query("SELECT MAX(trade_date) d FROM price_eod WHERE exchange=? AND symbol=? AND isin=?", (c["exchange"], c["symbol"], c["prev_isin"]))[0]["d"]
-        new_first = store.query("SELECT MIN(trade_date) d FROM price_eod WHERE exchange=? AND symbol=? AND isin=?", (c["exchange"], c["symbol"], c["isin"]))[0]["d"]
-        if old_last is not None and new_first is not None and old_last < new_first:
-            out.append({"exchange": c["exchange"], "symbol": c["symbol"], "old_isin": c["prev_isin"], "new_isin": c["isin"],
-                        "change_date": new_first, "source": "prices"})
+        g.sort(key=lambda x: (x["first"], x["isin"]))
+        for old, new in zip(g, g[1:]):
+            if old["last"] >= new["first"] or old["last"] < lo:
+                continue
+            if any(o is not old and o is not new and o["first"] <= new["first"] and o["last"] >= old["last"] for o in g):
+                continue                                   # a third ISIN spans the change: not a clean handover
+            if _days(new["first"], old["last"]) > SUCC_MAX_GAP_DAYS:
+                continue
+            out.append({"exchange": exchange, "symbol": symbol, "old_isin": old["isin"], "new_isin": new["isin"],
+                        "change_date": new["first"], "source": "prices"})
     return out
 
 

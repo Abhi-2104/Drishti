@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date
 
 from .. import resolve as resolver
@@ -93,3 +94,99 @@ def gather(store, gate: str, as_of: str, *, isin: str | None = None, blind: bool
     bundle = {"evidence": ev, "bundle_sha": sha, "blind": blind, "how_to_answer": {"gate": HOW_TO_ANSWER[gate], "all": HOW_TO_ANSWER["all"]},
               "answer_with": {"gate": gate, "as_of": as_of, **({"horizon_days": horizon_days} if horizon_days else {}), **({} if blind else {"isin": isin}), "allowed_actions": sorted(log.GATES[gate][1])}}
     return Result(data=bundle, as_of=as_of)
+
+
+# --- masked mode: hide WHEN the case is, not just WHICH stock ---------------------------------------------------------
+# A model trained on market history can recognise a date (or a Nifty / VIX / rupee level that pins one) and recall what
+# happened next. Masking keeps only what is relative to the case date: the stock's own prices rescaled to close = 100, returns,
+# distances, market signal labels and scores. Market inputs (absolute levels) and the seasonality signal (it names the month)
+# are dropped; every date becomes an offset in calendar days ("D-35"); month names and years in text are blanked.
+_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})(?:[T ][0-9:.+]+)?\b")
+_DMY = re.compile(r"\b\d{1,2}[-/ ](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[-/ ]\d{2,4}\b", re.I)
+_MONTH = re.compile(r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december|"
+                    r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b\.?", re.I)
+_YEAR = re.compile(r"\b(?:19[89]\d|20[0-4]\d)\b")
+_FY = re.compile(r"\b(?:FY|Q[1-4]\s?FY)\s?'?\d{2,4}\b", re.I)
+MASK_DROP_MARKET = ("seasonality",)
+_PRICE_KEYS = {"close", "atr14", "high_52w", "low_52w"}
+
+
+def _offset(m: re.Match, on: date) -> str:
+    try:
+        d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return "D?"
+    k = (d - on).days
+    return "D0" if k == 0 else f"D{k:+d}"
+
+
+def _mask_text(s: str, on: date) -> str:
+    s = _ISO.sub(lambda m: _offset(m, on), s)
+    s = _DMY.sub("[date]", s)
+    s = _FY.sub("[period]", s)
+    s = _YEAR.sub("[year]", s)
+    return _MONTH.sub("[month]", s)
+
+
+def _mask_any(v, on: date):
+    if isinstance(v, str):
+        return _mask_text(v, on)
+    if isinstance(v, dict):
+        return {_mask_text(k, on) if isinstance(k, str) else k: _mask_any(x, on) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_mask_any(x, on) for x in v]
+    return v
+
+
+def _rescale_price(sig: dict) -> dict:
+    """price_context with prices expressed against the latest close = 100 (returns, % distances and volume are kept)."""
+    d = dict(sig.get("details") or {})
+    c = d.get("close")
+    if not c:
+        return sig
+    f = 100.0 / c
+    sc = lambda x: None if x is None else round(x * f, 3)   # noqa: E731
+    for k in _PRICE_KEYS & d.keys():
+        d[k] = sc(d[k])
+    if isinstance(d.get("dma"), dict):
+        d["dma"] = {k: sc(x) for k, x in d["dma"].items()}
+    d["adjustments"] = [{"factor": a.get("factor"), "kind": a.get("kind")} for a in d.get("adjustments") or []]
+    out = []
+    for i in sig.get("inputs") or []:
+        name, val = i["input"], i["value"]
+        if name == "close":
+            val = 100.0
+        elif name in ("52-week high / low", "20 / 50 / 200-day average") and isinstance(val, list):
+            val = [sc(x) for x in val]
+        elif name == "ATR(14)":
+            val = sc(val)
+        elif name == "adjusted for":
+            val = None
+        out.append({**i, "value": val})
+    return {**sig, "details": d, "inputs": out, "note": "prices rescaled: latest close = 100"}
+
+
+def mask(bundle: dict) -> dict:
+    """A masked copy of a BLIND stock bundle (see the section comment). Re-hashed, so it is a different bundle from the dated one."""
+    if not bundle.get("blind"):
+        raise ValueError("mask() needs a blind bundle: the stock identity must already be hidden")
+    ev = json.loads(json.dumps(bundle["evidence"], default=str))
+    on = date.fromisoformat(ev["as_of"])
+    stock = ev.get("stock") or {}
+    sigs = stock.get("signals") or {}
+    if "price_context" in sigs:
+        sigs["price_context"] = _rescale_price(sigs["price_context"])
+    market = {}
+    for n, sig in (ev.get("market") or {}).items():
+        if n in MASK_DROP_MARKET:
+            continue
+        market[n] = {k: sig.get(k) for k in ("label", "score", "missing", "provisional")}
+    ev["market"] = market
+    ev["unknown"] = [u for u in ev.get("unknown") or [] if u.get("signal") not in MASK_DROP_MARKET]
+    ev.pop("investor", None)
+    ev = _mask_any(ev, on)
+    ev["as_of"] = "D0"
+    ev["masked"] = "dates are offsets in calendar days from the decision day D0; absolute market levels are hidden"
+    sha = hashlib.sha1(json.dumps(ev, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    aw = {**bundle["answer_with"], "as_of": "D0"}
+    return {**bundle, "evidence": ev, "bundle_sha": sha, "masked": True, "answer_with": aw}

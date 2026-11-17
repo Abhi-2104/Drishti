@@ -126,29 +126,95 @@ def backfill_fo_index(store, *, days=180, budget_s=3600, start=None, progress=_n
                   lambda s, r: ds.persist_fo_index(s, r.data), days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
 
 
+def _bse_for_day(d: date, isin_map: dict[str, str]) -> Result:
+    """BSE prices for one day in whichever file layout that day has (UDiFF from 2024, the old files before, or when UDiFF is missing)."""
+    if d >= UDIFF_FROM:
+        b = bse.bhavcopy(d, store=None)
+        if b.ok or b.error.kind not in (ErrorKind.NOT_FOUND, ErrorKind.BLOCKED_HTML):
+            return b
+    return bse.bhavcopy_legacy(d, store=None, isin_map=isin_map)
+
+
+def _bse_persist(s, rows: list[dict], isin_map: dict[str, str]) -> tuple[int, int]:
+    """(rows stored, rows dropped for want of an ISIN). Every scrip -> ISIN pair seen is remembered, and the in-memory map is
+    moved to the older ISIN as the backfill walks back in time."""
+    ds.record_bse_scrips(s, rows)
+    for r in rows:
+        if r.get("isin") and r.get("scrip_code"):
+            isin_map[r["scrip_code"]] = r["isin"]
+    return ds.persist_prices(s, rows, "BSE"), sum(1 for r in rows if not r.get("isin"))
+
+
 def backfill_prices(store, *, days=380, budget_s=3600, start=None, progress=_noop):
-    """One year of daily bars: NSE cash bhavcopy (all traded stocks) plus BSE for names NSE did not trade. Raw files are not
-    kept for backfilled days. A BSE failure on a day is reported but does not throw away that day's NSE prices."""
+    """Daily bars: NSE cash bhavcopy (all traded stocks) plus BSE for names NSE did not trade. Raw files are not kept for
+    backfilled days. A BSE failure on a day is reported but does not throw away that day's NSE prices; `backfill bse_prices`
+    later fills just the BSE side of such days."""
+    isin_map = ds.bse_isin_map(store)
+
     def fetch(d):
         legacy = d < UDIFF_FROM                                  # known not to exist: skip the guaranteed 404 and save ~1s a day
         n = nse_archive.cm_bhavcopy_legacy(d, store=None) if legacy else nse_archive.cm_bhavcopy(d, store=None)
         if not n.ok and not legacy and n.error.kind == ErrorKind.NOT_FOUND:     # before the UDiFF files existed (or a holiday: the legacy file is also missing then)
-            n, legacy = nse_archive.cm_bhavcopy_legacy(d, store=None), True
+            n = nse_archive.cm_bhavcopy_legacy(d, store=None)
         if not n.ok:
             return n
-        b = (bse.bhavcopy_legacy if legacy else bse.bhavcopy)(d, store=None)
+        b = _bse_for_day(d, isin_map)
         return Result(data={"nse": n.data, "bse": b.data if b.ok else [], "bse_error": None if b.ok else f"{b.error.kind}: {b.error.detail[:80]}"},
                       as_of=n.as_of)
 
     def persist(s, r):
-        k = ds.persist_prices(s, r.data["nse"], "NSE") + ds.persist_prices(s, r.data["bse"], "BSE")
+        k = ds.persist_prices(s, r.data["nse"], "NSE")
+        kb, unmapped = _bse_persist(s, r.data["bse"], isin_map)
         if r.data["bse_error"]:
             progress(f"   ...prices {r.as_of}: BSE file failed ({r.data['bse_error']}); NSE prices kept")
-        return k
+        elif unmapped:
+            progress(f"   ...prices {r.as_of}: {unmapped} BSE rows without a known ISIN skipped (oldest file layout)")
+        return k + kb
     ds.ensure(store, "price_eod")
     rep = _daily(store, "prices", "price_eod", fetch, persist, days=days, budget_s=budget_s, start=start or today_ist(), progress=progress)
+    progress("   ...prices: rebuilding split/bonus adjustments over the whole history (a few minutes, no output until done)")
     adj = ds.rebuild_adjustments(store)
     progress(_adj_line(adj, "prices"))
+    return rep
+
+
+def backfill_bse_prices(store, *, days=3800, budget_s=3600, start=None, clock=time.monotonic, progress=_noop):
+    """Only the BSE side, for stored sessions that have NSE prices but no BSE rows (a BSE file failed or was unreadable when the day
+    was first fetched). Walks back from the newest such day; resumes by itself, since a filled day no longer qualifies."""
+    ds.ensure(store, "price_eod")
+    rep = BackfillReport("bse_prices")
+    lo = ((start or today_ist()) - timedelta(days=days)).isoformat()
+    todo = [r["d"] for r in store.query(
+        "SELECT trade_date d FROM price_eod WHERE trade_date >= ? GROUP BY trade_date HAVING SUM(exchange='BSE') = 0 ORDER BY trade_date DESC",
+        (lo,))]
+    progress(f"   bse_prices: {len(todo)} stored sessions have NSE prices but no BSE prices")
+    isin_map = ds.bse_isin_map(store)
+    t0, streak, unmapped = clock(), 0, 0
+    for i, day in enumerate(todo, 1):
+        if clock() - t0 > budget_s:
+            rep.stopped = f"time budget reached at {day}; run again to continue"
+            break
+        r = _bse_for_day(date.fromisoformat(day), isin_map)
+        if r.ok:
+            k, miss = _bse_persist(store, r.data, isin_map)
+            rep.rows += k
+            unmapped += miss
+            rep.done += 1
+            streak = 0
+            rep.oldest, rep.newest = day, rep.newest or day
+            if rep.done % 25 == 0:
+                progress(f"   {_bar(i, len(todo))}  bse_prices: {rep.done} filled, now at {day}, {_eta(clock() - t0, i, len(todo))} ({clock() - t0:.0f}s)")
+        elif r.error.kind == ErrorKind.NOT_FOUND:
+            rep.holidays += 1          # BSE published no file for a day NSE traded: reported in the summary as missing
+            rep.failed.append({"date": day, "kind": "NOT_FOUND", "detail": "no BSE file for a day NSE traded"})
+        else:
+            rep.failed.append({"date": day, "kind": str(r.error.kind), "detail": r.error.detail[:160]})
+            streak += 1
+            if streak >= MAX_CONSECUTIVE_FAILURES:
+                rep.stopped = f"aborted after {streak} failures in a row (last: {r.error.kind}); host may be blocking, try later"
+                break
+    if unmapped:
+        progress(f"   ...bse_prices: {unmapped} rows from the oldest layout had no known ISIN and were skipped")
     return rep
 
 
@@ -437,6 +503,6 @@ TARGETS = {
     "index_closes": backfill_index_closes, "participant_oi": backfill_participant_oi, "fo_index": backfill_fo_index,
     "prices": backfill_prices, "macro": backfill_macro, "insider": backfill_insider, "shp": backfill_shp, "deals": backfill_deals,
     "corp_actions": backfill_corp_actions, "adjustments": backfill_adjustments, "delivery": backfill_delivery,
-    "india_macro": backfill_india_macro,
+    "india_macro": backfill_india_macro, "bse_prices": backfill_bse_prices,
 }
-DEFAULT_DAYS = {"prices": 380, "index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180, "deals": 365, "corp_actions": 730}
+DEFAULT_DAYS = {"prices": 380, "delivery": 380, "bse_prices": 3800, "index_closes": 400, "participant_oi": 365, "fo_index": 180, "insider": 180, "deals": 365, "corp_actions": 730}

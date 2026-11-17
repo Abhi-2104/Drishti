@@ -40,21 +40,33 @@ def parse_bhavcopy(body: bytes, *, min_rows: int = MIN_BSE_ROWS) -> list[dict]:
 
 
 LEGACY_URL = "https://www.bseindia.com/download/BhavCopy/Equity/EQ_ISINCODE_{ddmmyy}.zip"
+OLD_URL = "https://www.bseindia.com/download/BhavCopy/Equity/EQ{ddmmyy}_CSV.ZIP"   # before Dec 2016: no ISIN, no date
 LEGACY_MIN_ROWS = 1500   # 3,728 on 15 Sep 2021, 4,269 on 15 Mar 2024
 
 
-def _fix_commas_in_names(text: str) -> str:
-    """A few company names in the old file hold a comma ("TIAA NC, ..."), which pushes every later column right. A data line with more
-    fields than the header gets its surplus fields folded back into the name (the second field), so the other columns line up."""
+MAX_NAME_COMMAS = 2      # a real name holds one or two commas ("TIAA NC, INDIA"); more surplus fields means spliced records
+MAX_BROKEN_LINES = 5     # BSE's own file sometimes splices two records into one line plus a fragment (7 Feb and 15 Jul 2022)
+
+
+def _fix_commas_in_names(text: str, label: str = "bse_bhavcopy_legacy") -> str:
+    """Line up the columns of the old BSE file. A line with one or two surplus fields is a company name holding a comma: the
+    surplus is folded back into the name (the second field). A line with more surplus, or too few fields, is a record BSE itself
+    spliced or cut (seen: two records joined on one line, the rest of one on the next line); such lines are dropped, because
+    their values cannot be told apart. Up to MAX_BROKEN_LINES are dropped; more is PARSE_FAIL (the layout changed)."""
     import csv
     import io
     lines = text.splitlines()
     if not lines:
         return text
     width = len(next(csv.reader([lines[0]])))
-    out = [lines[0]]
+    out, broken = [lines[0]], []
     for ln in lines[1:]:
-        f = next(csv.reader([ln])) if ln.strip() else []
+        if not ln.strip():
+            continue
+        f = next(csv.reader([ln]))
+        if len(f) > width + MAX_NAME_COMMAS or len(f) < width:
+            broken.append(ln[:60])
+            continue
         if len(f) > width:
             extra = len(f) - width
             f = [f[0], " ".join(x.strip() for x in f[1:2 + extra])] + f[2 + extra:]
@@ -62,16 +74,20 @@ def _fix_commas_in_names(text: str) -> str:
             csv.writer(buf, lineterminator="").writerow(f)
             ln = buf.getvalue()
         out.append(ln)
+    if len(broken) > MAX_BROKEN_LINES:
+        raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: {len(broken)} lines with the wrong number of fields (first: {broken[0]!r}); layout changed?")
     return "\n".join(out)
 
 
-def parse_bhavcopy_legacy(body: bytes, *, min_rows: int = LEGACY_MIN_ROWS) -> list[dict]:
-    """Pre-UDiFF BSE bhavcopy (EQ_ISINCODE_DDMMYY.zip) -> the same row shape as parse_bhavcopy. The file has no ticker symbol
-    (only a name cut at 12 characters), so `symbol` is None; the ISIN and BSE scrip code are the keys."""
+def parse_bhavcopy_legacy(body: bytes, *, day: date | None = None, min_rows: int = LEGACY_MIN_ROWS) -> list[dict]:
+    """Pre-UDiFF BSE bhavcopy -> the same row shape as parse_bhavcopy. Three layouts exist (all 14 base columns, then):
+      Jul 2017 onward  EQ_ISINCODE_DDMMYY.zip: ISIN_CODE, TRADING_DATE
+      Dec 2016-Jun 2017 EQ_ISINCODE_DDMMYY.zip: ISIN_CODE, FILLER1 (no date: `day`, the requested date, is used)
+      before Dec 2016  EQDDMMYY_CSV.ZIP: no ISIN, no date (isin None here; bhavcopy_legacy maps scrip codes to ISINs)
+    The file has no ticker symbol (only a name cut at 12 characters), so `symbol` is None; ISIN and scrip code are the keys."""
     from datetime import datetime
     label = "bse_bhavcopy_legacy"
-    need = ["SC_CODE", "SC_NAME", "SC_GROUP", "OPEN", "HIGH", "LOW", "CLOSE", "LAST", "PREVCLOSE", "NO_TRADES", "NO_OF_SHRS", "NET_TURNOV",
-            "ISIN_CODE", "TRADING_DATE"]
+    need = ["SC_CODE", "SC_NAME", "SC_GROUP", "OPEN", "HIGH", "LOW", "CLOSE", "LAST", "PREVCLOSE", "NO_TRADES", "NO_OF_SHRS", "NET_TURNOV"]
     rows, seen = [], set()
     for r in u.csv_rows(_fix_commas_in_names(u.decode(u.unzip_single(body, label))), need, label):
         code = r["SC_CODE"]
@@ -80,12 +96,17 @@ def parse_bhavcopy_legacy(body: bytes, *, min_rows: int = LEGACY_MIN_ROWS) -> li
         if code in seen:
             raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: scrip code {code} appears twice")
         seen.add(code)
-        try:
-            day = datetime.strptime(r["TRADING_DATE"].title(), "%d-%b-%y").date().isoformat()
-        except ValueError:
-            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: cannot read a date from {r['TRADING_DATE'][:20]!r}") from None
+        if r.get("TRADING_DATE"):
+            try:
+                d = datetime.strptime(r["TRADING_DATE"].title(), "%d-%b-%y").date().isoformat()
+            except ValueError:
+                raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: cannot read a date from {r['TRADING_DATE'][:20]!r}") from None
+        elif day is not None:
+            d = day.isoformat()
+        else:
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: the file has no date column and no date was given")
         rows.append({
-            "trade_date": day, "symbol": None, "series": r["SC_GROUP"].strip() or "-", "isin": u.opt_str(r["ISIN_CODE"]),
+            "trade_date": d, "symbol": None, "series": r["SC_GROUP"].strip() or "-", "isin": u.opt_str(r.get("ISIN_CODE")),
             "name": u.opt_str(r["SC_NAME"]), "instrument_id": code, "scrip_code": code,
             "open": u.num(r["OPEN"], "open"), "high": u.num(r["HIGH"], "high"), "low": u.num(r["LOW"], "low"),
             "close": u.num(r["CLOSE"], "close"), "last": u.num(r["LAST"], "last"), "prev_close": u.num(r["PREVCLOSE"], "prev_close"),
@@ -98,12 +119,36 @@ def parse_bhavcopy_legacy(body: bytes, *, min_rows: int = LEGACY_MIN_ROWS) -> li
     return rows
 
 
+MISSING_NOTE = ("BSE answers a file that does not exist (a holiday, or not published yet) with a web page, not a 404; "
+                "if this repeats on a day NSE traded, it may be a block")
+
+
 @guard
-def bhavcopy_legacy(d: date, *, store=None) -> Result:
-    url = LEGACY_URL.format(ddmmyy=d.strftime("%d%m%y"))
-    rows, got = u.load_parsed(store, "bse_bhavcopy_legacy", d, lambda: get(url, BSE_WWW, expect="zip"), parse_bhavcopy_legacy, SOURCE)
+def bhavcopy_legacy(d: date, *, store=None, isin_map: dict[str, str] | None = None) -> Result:
+    """The old BSE file for `d`: EQ_ISINCODE first, then the older EQ..._CSV name. A web page for both names is NOT_FOUND (see
+    MISSING_NOTE). Rows of the oldest layout carry no ISIN: `isin_map` (scrip code -> ISIN, from later files) fills it, and rows it
+    cannot map are left with isin None (persist_prices drops them, and the backfill counts them)."""
+    ddmmyy = d.strftime("%d%m%y")
+    parse = lambda b: parse_bhavcopy_legacy(b, day=d, min_rows=LEGACY_MIN_ROWS)   # noqa: E731
+    try:
+        rows, got = u.load_parsed(store, "bse_bhavcopy_legacy", d, lambda: get(LEGACY_URL.format(ddmmyy=ddmmyy), BSE_WWW, expect="zip"),
+                                  parse, SOURCE)
+    except DrishtiError as e:
+        if e.kind not in (ErrorKind.BLOCKED_HTML, ErrorKind.NOT_FOUND):
+            raise
+        try:
+            rows, got = u.load_parsed(store, "bse_bhavcopy_old", d, lambda: get(OLD_URL.format(ddmmyy=ddmmyy), BSE_WWW, expect="zip"),
+                                      parse, SOURCE)
+        except DrishtiError as e2:
+            if e2.kind in (ErrorKind.BLOCKED_HTML, ErrorKind.NOT_FOUND):
+                raise DrishtiError(ErrorKind.NOT_FOUND, f"bse_bhavcopy_legacy {d}: neither file name exists. {MISSING_NOTE}") from None
+            raise
     if rows[0]["trade_date"] != d.isoformat():
         raise DrishtiError(ErrorKind.STALE, f"bse_bhavcopy_legacy: file for {d} contains data for {rows[0]['trade_date']}")
+    if isin_map:
+        for r in rows:
+            if r["isin"] is None:
+                r["isin"] = isin_map.get(r["scrip_code"])
     return Result(data=rows, as_of=d.isoformat(), sources=[got.source(SOURCE)])
 
 

@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--cases", default=None, help="case file (JSON) written by `cases`")
     dc.add_argument("--out", default=None, help="export: folder for evidence bundles")
     dc.add_argument("--no-blind", action="store_true", help="export: keep the stock's name and symbol in the bundles")
+    dc.add_argument("--masked", action="store_true", help="export: also hide the date (offsets, prices rescaled, market levels and month names dropped)")
     dc.add_argument("--key", default=None, help="import: _key.json written by export")
     dc.add_argument("--answers", default=None, help="import: JSON-lines answers file")
     dc.add_argument("--agent", default=None)
@@ -236,7 +237,7 @@ def _decisions(st, args, cfg) -> int:
             prof = load_profile(cfg)
         except Exception:
             prof = None
-        r = cs.export_bundles(st, cases, Path(args.out), blind=not args.no_blind, profile=prof)
+        r = cs.export_bundles(st, cases, Path(args.out), blind=not args.no_blind, masked=args.masked, profile=prof)
         print(_json.dumps(r, indent=1))
         return 0 if r["written"] else 1
     if w == "import":

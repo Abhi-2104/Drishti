@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from drishti.decisions import gather, log, rules, score
+from drishti.decisions import cases as cs, gather, log, rules, score
 from drishti.store import Store
 from drishti.store import datasets as ds
 
@@ -529,3 +529,40 @@ def test_watch_scan_escalates_when_the_stop_is_hit_and_reports_only_new_items(tm
     th.save(st, isin="INE002A01018", symbol="RELIANCE", as_of=last, thesis="t", stop=close + 1, exit_triggers=["stop"])
     r2 = watch.scan(st, prof, date.fromisoformat(last))
     assert r2.data["since"] == last and r2.data["escalate"] and "STOP HIT" in r2.data["escalate"][0]["why"][0]
+
+
+def test_masked_bundle_leaks_no_date_level_or_identity(st):
+    import json as _j
+    import re as _re
+    blind = gather.gather(st, "entry", AS_OF, isin=UP, blind=True).data
+    m = gather.mask(blind)
+    text = _j.dumps(m["evidence"])
+    assert not _re.search(r"\b(19|20)\d{2}-\d{2}-\d{2}\b", text)          # no calendar date anywhere
+    assert AS_OF[:4] not in text                                           # not even the year
+    assert m["evidence"]["as_of"] == "D0" and m["answer_with"]["as_of"] == "D0" and m["masked"] is True
+    pc = m["evidence"]["stock"]["signals"]["price_context"]
+    assert pc["details"]["close"] == 100.0 and next(i for i in pc["inputs"] if i["input"] == "close")["value"] == 100.0
+    assert pc["inputs"][1] == blind["evidence"]["stock"]["signals"]["price_context"]["inputs"][1] or "return" in pc["inputs"][1]["input"]
+    assert "seasonality" not in m["evidence"]["market"]
+    for sig in m["evidence"]["market"].values():
+        assert set(sig) == {"label", "score", "missing", "provisional"}    # labels and scores only: no absolute levels
+    assert m["bundle_sha"] != blind["bundle_sha"]
+    assert gather.mask(blind) == m                                         # deterministic
+
+
+def test_mask_refuses_an_unblinded_bundle_and_rewrites_text_dates():
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        gather.mask({"blind": False, "evidence": {}})
+    from datetime import date as _d
+    t = gather._mask_text("ex-date 2024-03-01, filed 15-Sep-21 for FY24, Q2 FY2025, in March 2020", _d(2024, 3, 11))
+    assert t == "ex-date D-10, filed [date] for [period], [period], in [month] [year]"
+
+
+def test_masked_export_skips_market_gates_and_writes_offsets(st, tmp_path):
+    cases = [{"case_id": "a", "gate": "entry", "as_of": AS_OF, "isin": UP, "symbol": "UPCO", "horizon_days": 20},
+             {"case_id": "b", "gate": "macro", "as_of": AS_OF, "isin": None, "symbol": None, "horizon_days": 60}]
+    r = cs.export_bundles(st, cases, tmp_path / "b", masked=True)
+    assert r["written"] == 1 and r["failed_count"] == 1 and r["masked"] is True
+    doc = (tmp_path / "b" / "case-00001.json").read_text()
+    assert AS_OF not in doc and '"as_of": "D0"' in doc

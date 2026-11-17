@@ -86,7 +86,7 @@ def test_price_backfill_falls_back_to_legacy_files_for_old_dates(monkeypatch):
     monkeypatch.setattr(bf.nse_archive, "cm_bhavcopy", nse_new)
     monkeypatch.setattr(bf.nse_archive, "cm_bhavcopy_legacy", nse_old)
     monkeypatch.setattr(bf.bse, "bhavcopy", lambda d, store=None: Result(data=[], as_of=d.isoformat()))
-    monkeypatch.setattr(bf.bse, "bhavcopy_legacy", lambda d, store=None: Result(data=[], as_of=d.isoformat()))
+    monkeypatch.setattr(bf.bse, "bhavcopy_legacy", lambda d, store=None, isin_map=None: Result(data=[], as_of=d.isoformat()))
     r_new = bf.backfill_prices(st, days=1, start=new)
     assert r_new.done == 1 and ("nse_old", new) not in used          # the new file existed: the old reader is not touched
     r_old = bf.backfill_prices(st, days=1, start=old)
@@ -101,3 +101,116 @@ def test_bse_legacy_name_with_a_comma_does_not_shift_the_columns():
     rows = b.parse_bhavcopy_legacy(zipped(BSE_HEAD + BSE_ROWS + line), min_rows=1)
     r = next(x for x in rows if x["scrip_code"] == "500999")
     assert r["isin"] == "INE000A01011" and r["close"] == 10.5 and r["volume"] == 100 and "TIAA" in r["name"]
+
+
+# --- the two older BSE layouts (real rows from Jan 2017 and Jan 2016) --------------------------------------------
+BSE_2017_HEAD = "SC_CODE,SC_NAME,SC_GROUP,SC_TYPE,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,NO_TRADES,NO_OF_SHRS,NET_TURNOV,TDCLOINDI,ISIN_CODE,FILLER1,FILLER2,FILLER3\n"
+BSE_2017_ROWS = ("500002,ABB LTD.    ,A ,Q,1125.00,1139.95,1118.05,1124.45,1124.45,1130.85,1147,6274,7074418.00,,INE117A01022,,,\n"
+                 "500003,AEGIS LOGIS ,B ,Q,140.70,140.70,134.60,135.65,135.65,138.80,744,28961,3941843.00,,INE208C01025,,,\n")
+BSE_2016_HEAD = "SC_CODE,SC_NAME,SC_GROUP,SC_TYPE,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,NO_TRADES,NO_OF_SHRS,NET_TURNOV,TDCLOINDI\n"
+BSE_2016_ROWS = ("500002,ABB LTD.    ,A ,Q,1015.00,1035.00,1002.05,1015.05,1015.05,1013.10,531,4473,4562659.00,\n"
+                 "500003,AEGIS LOGIS ,B ,Q,97.75,100.00,89.00,90.05,90.05,94.95,775,48029,4596545.00,XD\n")
+
+
+def test_bse_2017_layout_without_a_date_column_takes_the_requested_date():
+    rows = b.parse_bhavcopy_legacy(zipped(BSE_2017_HEAD + BSE_2017_ROWS), day=date(2017, 1, 16), min_rows=1)
+    abb = next(r for r in rows if r["scrip_code"] == "500002")
+    assert abb["trade_date"] == "2017-01-16" and abb["isin"] == "INE117A01022" and abb["close"] == 1124.45
+
+
+def test_bse_2016_layout_has_no_isin_and_needs_a_date():
+    rows = b.parse_bhavcopy_legacy(zipped(BSE_2016_HEAD + BSE_2016_ROWS), day=date(2016, 1, 15), min_rows=1)
+    assert all(r["isin"] is None for r in rows) and rows[0]["trade_date"] == "2016-01-15" and rows[1]["close"] == 90.05
+    with pytest.raises(DrishtiError) as e:
+        b.parse_bhavcopy_legacy(zipped(BSE_2016_HEAD + BSE_2016_ROWS), min_rows=1)
+    assert e.value.kind == ErrorKind.PARSE_FAIL
+
+
+class _Got:
+    def __init__(self, body):
+        self.body = body
+
+    def source(self, name):
+        from drishti.core.envelope import Source
+        return Source(name=name, url="x", fetched_at="t")
+
+
+def test_bse_legacy_falls_back_to_the_old_name_and_maps_scrip_codes(monkeypatch):
+    calls = []
+
+    def fake_get(url, profile, expect="text"):
+        calls.append(url)
+        if "ISINCODE" in url:
+            raise DrishtiError(ErrorKind.BLOCKED_HTML, "HTML where zip expected")
+        return _Got(zipped(BSE_2016_HEAD + BSE_2016_ROWS))
+    monkeypatch.setattr(b, "get", fake_get)
+    monkeypatch.setattr(b, "LEGACY_MIN_ROWS", 1)
+    r = b.bhavcopy_legacy(date(2016, 1, 15), isin_map={"500002": "INE117A01022"})
+    assert r.ok and len(calls) == 2 and "EQ150116_CSV.ZIP" in calls[1]
+    by = {x["scrip_code"]: x["isin"] for x in r.data}
+    assert by == {"500002": "INE117A01022", "500003": None}            # unknown code: left without an ISIN, never guessed
+
+
+def test_bse_web_page_for_both_names_is_not_found_not_a_block(monkeypatch):
+    def fake_get(url, profile, expect="text"):
+        raise DrishtiError(ErrorKind.BLOCKED_HTML, "HTML where zip expected")
+    monkeypatch.setattr(b, "get", fake_get)
+    r = b.bhavcopy_legacy(date(2016, 8, 15))
+    assert not r.ok and r.error.kind == ErrorKind.NOT_FOUND and "web page" in r.error.detail
+
+
+def test_bse_a_real_block_is_still_a_block(monkeypatch):
+    def fake_get(url, profile, expect="text"):
+        raise DrishtiError(ErrorKind.BLOCKED, "HTTP 403")
+    monkeypatch.setattr(b, "get", fake_get)
+    r = b.bhavcopy_legacy(date(2016, 1, 15))
+    assert not r.ok and r.error.kind == ErrorKind.BLOCKED
+
+
+def test_scrip_map_prefers_the_earliest_isin_and_bse_prices_fills_only_missing_days(monkeypatch):
+    from drishti.store import datasets as ds
+    st = Store()
+    ds.record_bse_scrips(st, [{"scrip_code": "500002", "isin": "INE_NEW", "trade_date": "2020-01-01"},
+                              {"scrip_code": "500002", "isin": "INE_OLD", "trade_date": "2017-01-02"}])
+    assert ds.bse_isin_map(st)["500002"] == "INE_OLD"
+
+    def bar(d, isin, ex_series="EQ"):
+        return {"trade_date": d, "isin": isin, "series": ex_series, "symbol": "X", "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+                "prev_close": 1.0, "volume": 1, "turnover": 1.0, "trades": 1}
+    ds.persist_prices(st, [bar("2016-01-14", "INE_A")], "NSE")                 # NSE only: BSE missing
+    ds.persist_prices(st, [bar("2016-01-15", "INE_A")], "NSE")
+    ds.persist_prices(st, [bar("2016-01-15", "INE_B", "B")], "BSE")             # already has BSE: left alone
+    asked = []
+
+    def fake_legacy(d, store=None, isin_map=None):
+        asked.append(d.isoformat())
+        rows = [{**bar(d.isoformat(), None, "B"), "scrip_code": "500002"}, {**bar(d.isoformat(), None, "B"), "scrip_code": "599999"}]
+        for r in rows:
+            r["isin"] = (isin_map or {}).get(r["scrip_code"])
+        return Result(data=rows, as_of=d.isoformat())
+    monkeypatch.setattr(bf.bse, "bhavcopy_legacy", fake_legacy)
+    rep = bf.backfill_bse_prices(st, days=4000, start=date(2016, 1, 20))
+    assert asked == ["2016-01-14"] and rep.done == 1 and rep.rows == 1
+    got = st.query("SELECT isin FROM price_eod WHERE trade_date='2016-01-14' AND exchange='BSE'")
+    assert [x["isin"] for x in got] == ["INE_OLD"]
+    again = bf.backfill_bse_prices(st, days=4000, start=date(2016, 1, 20))
+    assert again.done == 0                                                     # filled days no longer qualify
+
+
+def test_bse_spliced_records_are_dropped_not_misread():
+    # real lines from 15 Jul 2022: two records joined on one line, and the tail of another on the next line
+    spliced = ("531780,KACL        ,XT,Q,107.85,107.85,107.85,107.85,107.85,113.50,56,2154,2541269,CHEMFABALKA ,B ,Q,170.00,170.00,166.20,"
+               "166.70,166.30,169.20,34,303,50542.00,,INE783X01023,15-Jul-22,,\n")
+    tail = "9.09,8.82,9.00,9.00,8.94,54,6197,55583.00,,INE204N01013,15-Jul-22,,\n"
+    head = BSE_HEAD.replace("15-Sep-21", "15-Jul-22")
+    good = BSE_ROWS.replace("15-Sep-21", "15-Jul-22")
+    rows = b.parse_bhavcopy_legacy(zipped(head + good + spliced + tail), min_rows=1)
+    assert {r["scrip_code"] for r in rows} == {"500002", "500325", "532712"}        # the spliced pair and the fragment are gone
+    assert not any(r["isin"] in ("INE783X01023", "INE204N01013") for r in rows)
+
+
+def test_bse_many_broken_lines_is_a_layout_change():
+    bad = "".join(f"9.0{i},1,2\n" for i in range(b.MAX_BROKEN_LINES + 1))
+    with pytest.raises(DrishtiError) as e:
+        b.parse_bhavcopy_legacy(zipped(BSE_HEAD + BSE_ROWS + bad), min_rows=1)
+    assert e.value.kind == ErrorKind.PARSE_FAIL and "wrong number of fields" in e.value.detail
