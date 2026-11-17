@@ -39,6 +39,40 @@ Add this under `mcpServers` in `%APPDATA%\Claude\claude_desktop_config.json`, th
 Check by asking Claude "run drishti data_health". Fill the database first with `uv run drishti run <job>` (see `drishti jobs`).
 This registration edits a file outside the project, so it is done by you, not by the build.
 
+## Register in Claude Code (CLI)
+
+One line, from any folder (user scope = available in every project; use `-s project` to share it through a `.mcp.json` instead):
+
+```powershell
+claude mcp add drishti -s user -- uv run --project C:\Users\abhij\Documents\Drishti\v2 drishti mcp
+```
+
+Check it: `claude mcp list` (should show `drishti` as connected), or type `/mcp` inside Claude Code. Then ask, for example:
+"run drishti data_health", "what does drishti say about RELIANCE, price and insider signals", or
+"gather entry evidence for TCS as of today and tell me ENTER, WAIT or AVOID with the thesis, then record it".
+Remove with `claude mcp remove drishti -s user`. Restart Claude Code after changing the database path or upgrading drishti.
+
+The same server works in `omp` (put the same command in the profile's `mcp.json`), Cursor, Codex CLI and Gemini CLI.
+
+## Slash commands
+
+The server also publishes prompts, which Claude Code shows as slash commands (type `/` and `drishti`):
+
+| Command | What it does |
+|---|---|
+| `/mcp__drishti__entry TCS` | gathers evidence, decides ENTER / WAIT / AVOID, logs it |
+| `/mcp__drishti__exit TCS` | HOLD / TRIM / EXIT on a holding, logs it |
+| `/mcp__drishti__macro` | RISK_ON / NEUTRAL / RISK_OFF for the market, logs it |
+| `/mcp__drishti__health` | plain-words data freshness |
+| `/mcp__drishti__scorecard` | how logged calls are doing, by author |
+
+Restart Claude Code after upgrading drishti so it re-reads the list. Other clients show the same prompts in their own way.
+
+## Check the whole chain
+
+`uv run drishti selftest` runs settings, store, data health, the MCP server and its tools, a signal, a blind evidence bundle,
+a rules decision (dry run) and the decision log and scorer, against your own database. Read-only and offline.
+
 ## Adding tools
 
 Write a plain function of a `Store` in `drishti/mcp_server.py` that returns `Result.to_dict()`, test it without the SDK,

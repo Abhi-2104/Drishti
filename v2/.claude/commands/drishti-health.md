@@ -1,0 +1,7 @@
+---
+description: Drishti data freshness in plain words
+allowed-tools: mcp__drishti__data_health
+---
+Call data_health and summarise it for me in under 10 lines: which datasets are fresh, which are stale or failed, and whether that matters today (note weekends and holidays). Do not dump the raw output.
+
+Format: follow the Drishti answer shape (and the active level, if one is loaded; otherwise use the investor level). Headline (**VERDICT** · subject · horizon vs yardstick · logged id or "not logged" · confidence), the read, then an evidence table (Signal | Reading | Against what | Visual | As of | Source | Says; 🟢 for, 🔴 against, 🟡 mixed, ⚪ unknown; unknowns as rows), with text visuals (bars █░, range gauge ├──●──┤, sparklines ▁▃▇, ▲▼ deltas) where they add information; for calls a scenario table (Case | Trigger | What the data would show | Call becomes), a track-record table when the log has related calls, a blind-spots table (Missing | Why it matters | How to fill it), and a final "Sources:" line naming each provider (NSE bhavcopy, NSE participant OI, NSE insider-trading disclosures, NSE shareholding filings, FRED, Yahoo Finance, MoSPI, CFTC, BSE, NSDL) with its as-of date. Every figure needs its date, its source and a yardstick; differences are computed. Compare = a column per stock; brief = Area | Reading | Against what | Visual | Source | Lean; review = Call | Date | Outcome | vs yardstick.

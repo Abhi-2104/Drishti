@@ -196,7 +196,7 @@ SIGNAL_TOOLS = {   # tool name -> (signal name, description). v1 names kept wher
 }
 
 
-def build_server(open_store: Callable[[], Store]):
+def build_server(open_store: Callable[[], Store], load_profile: Callable[[], object] | None = None):
     """The MCP server. A store is opened per call and closed after, so a long-lived server never holds a stale connection."""
     from mcp.server.mcpserver import MCPServer   # imported here so the rest of drishti works without the SDK installed
 
@@ -393,10 +393,110 @@ def build_server(open_store: Callable[[], Store]):
         with open_store() as st:
             return tool_score_decisions(st, gate, agent, model, since, until, compare)
 
+
+    def _profile():
+        try:
+            return load_profile() if load_profile else None
+        except Exception:                       # no profile yet: levels and the watchlist degrade, nothing else changes
+            return None
+
+    @srv.tool()
+    def get_trade_levels(query: str, as_of: str | None = None, risk_budget_pct: float = 1.0) -> dict:
+        """Derived (not predicted) trade levels for one stock: entry zone or the level that turns the trend, a volatility stop
+        (2.5 x average true range), and a position size from your max_position_pct and a risk budget (default 1% of portfolio).
+        No target is derived. Price-history arithmetic only: it ignores fundamentals and results dates."""
+        from .decisions import levels
+        with open_store() as st:
+            try:
+                isin = _stock_isin(st, query)
+                return _env(levels.derive(st, isin, _date(as_of), profile=_profile(), risk_budget_pct=risk_budget_pct))
+            except DrishtiError as e:
+                return _env(Result(error=e))
+
+    @srv.tool()
+    def save_thesis(query: str, as_of: str, thesis: str, exit_triggers: list[str], entry_low: float | None = None, entry_high: float | None = None,
+                    stop: float | None = None, target: float | None = None, size_pct: float | None = None,
+                    must_stay_true: list[str] | None = None, decision_id: str | None = None) -> dict:
+        """Write the working thesis for a stock you hold or plan to: thesis, entry zone, stop, target, size, what must stay true and
+        observable exit triggers. Closes the previous open thesis for that stock. /exit and the watchlist scan read it."""
+        from .decisions import thesis as th
+        with open_store() as st:
+            try:
+                isin = _stock_isin(st, query)
+                sym = (st.get_security(isin) or {}).get("nse_symbol")
+                return _env(th.save(st, isin=isin, symbol=sym, as_of=as_of, thesis=thesis, entry_low=entry_low, entry_high=entry_high, stop=stop,
+                                    target=target, size_pct=size_pct, must_stay_true=must_stay_true, exit_triggers=exit_triggers, decision_id=decision_id))
+            except DrishtiError as e:
+                return _env(Result(error=e))
+
+    @srv.tool()
+    def get_thesis(query: str, include_closed: bool = False) -> dict:
+        """The open thesis for a stock (or all, with include_closed) with its re-check history."""
+        from .decisions import thesis as th
+        with open_store() as st:
+            try:
+                return _env(th.get(st, _stock_isin(st, query), include_closed=include_closed))
+            except DrishtiError as e:
+                return _env(Result(error=e))
+
+    @srv.tool()
+    def recheck_thesis(thesis_id: str, as_of: str, intact: bool, note: str, close: bool = False) -> dict:
+        """Log a re-check of a thesis (intact or not, and what changed). close=true ends it (sold, or the thesis broke)."""
+        from .decisions import thesis as th
+        with open_store() as st:
+            return _env(th.recheck(st, thesis_id, as_of=as_of, intact=intact, note=note, close=close))
+
+    @srv.tool()
+    def watch_scan(as_of: str | None = None, since: str | None = None, mark: bool = False) -> dict:
+        """Cheap watchlist monitor: per watched name, what is new since the last scan (insider trades, bulk/block deals, announcements,
+        pledge and insider flags, trend) and ESCALATE lines for names with an open thesis whose stop or target hit or whose red flags rose.
+        mark=true remembers today as the last scan so the next one shows only what is new."""
+        from .decisions import watch
+        with open_store() as st:
+            return _env(watch.scan(st, _profile(), _date(as_of) or date.today(), since=since, mark=mark))
+
+    # --- slash commands: MCP prompts show up as /mcp__drishti__<name> in Claude Code, and in any client that lists prompts ---
+    _RULES = ("Rules: use only what the evidence bundle holds; anything under 'unknown' is unknown, not neutral; do not use memory of events after "
+              "the as_of date. A call needs confidence (0.50-0.99, the probability it turns out right over the horizon), a thesis in your own words, "
+              "an invalidation that is an observable event (a price level, a signal reading, a dated event), and only signals that have a reading. "
+              "A no-call (WAIT, SKIP, NEUTRAL) is a valid answer. Record with record_decision using agent 'claude-code' and your own model id, "
+              "then give the user the call, the thesis and the invalidation in a few lines.")
+
+    @srv.prompt(name="entry", description="Entry call on one stock: ENTER, WAIT or AVOID, logged to the decision log.")
+    def p_entry(stock: str, horizon_days: int = 60) -> str:
+        return (f"Judge whether to enter {stock} now. 1) Call data_health only if freshness matters. 2) Call gather_evidence with gate='entry', "
+                f"query='{stock}', as_of = the latest stored session (today if a session exists, else the date data_health shows for cm_bhavcopy), "
+                f"blind=false. 3) Decide ENTER, WAIT or AVOID over {horizon_days} sessions against the Nifty 50. {_RULES}")
+
+    @srv.prompt(name="exit", description="Exit call on one holding: HOLD, TRIM or EXIT, logged to the decision log.")
+    def p_exit(stock: str, horizon_days: int = 60) -> str:
+        return (f"Judge whether to keep {stock}. Call gather_evidence with gate='exit', query='{stock}', as_of = the latest stored session. "
+                f"Decide HOLD, TRIM or EXIT over {horizon_days} sessions against the Nifty 50. {_RULES}")
+
+    @srv.prompt(name="macro", description="Market-wide call: RISK_ON, NEUTRAL or RISK_OFF, logged to the decision log.")
+    def p_macro(horizon_days: int = 60) -> str:
+        return (f"Judge the market regime. Call gather_evidence with gate='macro', as_of = the latest stored session. Decide RISK_ON, NEUTRAL or "
+                f"RISK_OFF over {horizon_days} sessions (the Nifty 50 against cash). {_RULES}")
+
+    @srv.prompt(name="health", description="What data is fresh and what failed, in plain words.")
+    def p_health() -> str:
+        return ("Call data_health and summarise it for me: which datasets are fresh, which are stale or failed and whether it matters on a weekend, "
+                "in under 10 lines. Do not dump the raw output.")
+
+    @srv.prompt(name="scorecard", description="How the logged calls are doing so far, by author.")
+    def p_scorecard(gate: str = "") -> str:
+        return ("Call score_decisions" + (f" with gate='{gate}'" if gate else "") + " and explain in plain words: per author, how many calls are scored, "
+                "pending or without data, the hit rate and the mean edge after cost, and whether anyone has beaten always-long. "
+                "Say clearly when there are too few scored cases to conclude anything.")
+
     return srv
 
 
-def serve(db_path, signal_settings=None) -> None:
+def serve(db_path, signal_settings=None, profile_path=None) -> None:
     from .signals.base import use_settings
     use_settings(signal_settings)
-    build_server(lambda: Store(db_path)).run("stdio")
+
+    def load():
+        from .profile import load_profile
+        return load_profile(profile_path) if profile_path else None
+    build_server(lambda: Store(db_path), load).run("stdio")

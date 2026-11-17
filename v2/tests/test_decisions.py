@@ -412,3 +412,120 @@ def test_forward_step_freezes_the_universe_runs_rules_and_exports_blind_bundles(
 def test_rules_accept_a_per_case_horizon(st):
     r = rules.run(st, "entry", AS_OF, isin=UP, symbol="RISER", horizon_days=20)
     assert r.ok and r.data["horizon_days"] == 20
+
+
+# --- history + selftest -----------------------------------------------------------------------------------------
+def test_history_registers_missing_isins_runs_rules_and_reports_per_year(st):
+    from drishti.decisions import history
+    c = history.coverage(st)
+    assert c["sessions"] == len(DAYS) and c["stocks_ever_traded"] == 2 and c["stocks_missing_from_master"] == 0
+    import tempfile, pathlib
+    out = pathlib.Path(tempfile.mkdtemp()) / "h" / "cases.json"
+    r = history.run(st, out=out, every=40, n_stocks=2, min_sessions_before=100)
+    assert r["done"] and r["cases"] > 0 and r["rules"]["failed"] == 0 and out.exists()
+    rep = history.report(st)
+    assert any(x["gate"] == "entry" for x in rep["overall"]) and rep["per_year"] and "verdict" in rep["rules_vs_always_long_entry"]
+    short = history.run(st, out=out, min_sessions_before=5000)
+    assert not short["done"] and "Backfill" in short["why"]
+
+
+def test_selftest_passes_on_a_populated_store(st, monkeypatch, capsys):
+    from drishti import selftest
+    import drishti.store as store_mod
+
+    class Cfg:
+        db_path = ":memory:"
+    monkeypatch.setattr(store_mod, "Store", lambda *a, **k: _Keep(st))
+    assert selftest.run(Cfg()) == 0
+    assert "PASSED" in capsys.readouterr().out
+
+
+class _Keep:
+    """Hands out the test store without letting `with` close it."""
+    def __init__(self, s):
+        self._s = s
+
+    def __enter__(self):
+        return self._s
+
+    def __exit__(self, *a):
+        return False
+
+    def __getattr__(self, k):
+        return getattr(self._s, k)
+
+
+def test_mcp_server_lists_slash_command_prompts():
+    import asyncio
+    from drishti import mcp_server as m
+    srv = m.build_server(lambda: _Keep(None))
+    names = {p.name for p in asyncio.run(srv.list_prompts())}
+    assert {"entry", "exit", "macro", "health", "scorecard"} <= names
+    got = asyncio.run(srv.get_prompt("entry", {"stock": "TCS"}))
+    text = got.messages[0].content.text
+    assert "gather_evidence" in text and "TCS" in text and "invalidation" in text
+
+
+# ---------- trade levels, thesis log, watchlist scan ----------
+def _price_store(tmp_path, closes, isin="INE002A01018", symbol="RELIANCE"):
+    from datetime import date, timedelta
+    from drishti.store import Store, datasets as ds
+    st = Store(tmp_path / "p.db")
+    st.upsert_security(isin, name="Reliance Industries Limited", nse_symbol=symbol, source="t")
+    ds.ensure(st, "price_eod")
+    d, rows = date(2026, 11, 6) - timedelta(days=len(closes) * 2), []
+    for c in closes:
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        rows.append(dict(trade_date=d.isoformat(), isin=isin, exchange="NSE", series="EQ", symbol=symbol, open=c, high=c * 1.01, low=c * 0.99,
+                         close=c, prev_close=c, volume=1000, turnover=1.0, trades=1))
+        d += timedelta(days=1)
+    st.upsert("price_eod", rows, key=("trade_date", "isin", "exchange", "series"))
+    return st, rows[-1]["trade_date"]
+
+
+def test_levels_stop_below_close_and_no_entry_zone_in_a_downtrend(tmp_path):
+    from drishti.decisions import levels
+    from drishti.profile import Profile, Risk
+    up, last = _price_store(tmp_path, [100 + i * 0.5 for i in range(260)])
+    r = levels.derive(up, "INE002A01018", last, profile=Profile(risk=Risk(max_position_pct=5.0)))
+    assert r.ok and r.data["stop"] < r.data["close"] and r.data["entry_zone"] and r.data["target"] is None
+    assert r.data["size_pct_of_portfolio"] <= 5.0 and r.data["derived"] is True
+    down, last2 = _price_store(tmp_path, [300 - i * 0.5 for i in range(260)], isin="INE009A01021", symbol="INFY")
+    r2 = levels.derive(down, "INE009A01021", last2)
+    assert r2.ok and r2.data["entry_zone"] is None and "50-day" in r2.data["entry_note"]
+
+
+def test_thesis_needs_an_exit_trigger_and_a_new_one_closes_the_old(tmp_path):
+    from drishti.decisions import thesis as th
+    from drishti.store import Store
+    st = Store(tmp_path / "t.db")
+    bad = th.save(st, isin="INE002A01018", symbol="RELIANCE", as_of="2026-11-06", thesis="Retail and Jio compounding", exit_triggers=[])
+    assert not bad.ok
+    stop_bad = th.save(st, isin="INE002A01018", symbol="RELIANCE", as_of="2026-11-06", thesis="x", entry_low=100, stop=120, exit_triggers=["close below 90"])
+    assert not stop_bad.ok
+    a = th.save(st, isin="INE002A01018", symbol="RELIANCE", as_of="2026-11-06", thesis="first", entry_low=100, entry_high=104, stop=90, exit_triggers=["close below 90"])
+    b = th.save(st, isin="INE002A01018", symbol="RELIANCE", as_of="2026-11-07", thesis="second", stop=92, exit_triggers=["pledge above 25%"])
+    got = th.get(st, "INE002A01018").data["theses"]
+    assert len(got) == 1 and got[0]["id"] == b.data["id"] and got[0]["exit_triggers"] == ["pledge above 25%"]
+    assert th.recheck(st, b.data["id"], as_of="2026-11-08", intact=True, note="results fine").ok
+    assert th.recheck(st, b.data["id"], as_of="2026-11-08", intact=True, note=" ").ok is False
+    assert th.get(st, "INE002A01018").data["theses"][0]["rechecks"][0]["intact"] == 1
+    assert th.recheck(st, b.data["id"], as_of="2026-11-09", intact=False, note="sold", close=True).ok
+    assert th.get(st, "INE002A01018").data["n"] == 0 and th.get(st, "INE002A01018", include_closed=True).data["n"] == 2
+    assert a.ok
+
+
+def test_watch_scan_escalates_when_the_stop_is_hit_and_reports_only_new_items(tmp_path):
+    from datetime import date
+    from drishti.decisions import thesis as th, watch
+    from drishti.profile import Profile, WatchItem
+    st, last = _price_store(tmp_path, [200 - i * 0.2 for i in range(260)])
+    close = st.query("SELECT close FROM price_eod ORDER BY trade_date DESC LIMIT 1")[0]["close"]
+    prof = Profile(watchlist=(WatchItem(isin="INE002A01018", symbol="RELIANCE"),))
+    assert not watch.scan(st, Profile(), date.fromisoformat(last)).ok            # empty watchlist is an error, not a quiet "all clear"
+    r = watch.scan(st, prof, date.fromisoformat(last), mark=True)
+    assert r.ok and r.data["scanned"] == 1 and r.data["escalate"] == []
+    th.save(st, isin="INE002A01018", symbol="RELIANCE", as_of=last, thesis="t", stop=close + 1, exit_triggers=["stop"])
+    r2 = watch.scan(st, prof, date.fromisoformat(last))
+    assert r2.data["since"] == last and r2.data["escalate"] and "STOP HIT" in r2.data["escalate"][0]["why"][0]

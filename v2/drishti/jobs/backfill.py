@@ -52,8 +52,24 @@ def _have_dates(store: Store, table: str, col: str = "trade_date") -> set[str]:
     return {r["d"] for r in store.query(f"SELECT DISTINCT {col} AS d FROM {table}")}
 
 
+UDIFF_FROM = date(2024, 1, 1)   # the UDiFF price files exist from here (checked 9 Nov 2026); earlier days use the older file format
+
+
 def _noop(msg: str) -> None:
     pass
+
+
+def _bar(done: int, total: int, width: int = 20) -> str:
+    frac = 0 if total <= 0 else min(1.0, done / total)
+    n = round(frac * width)
+    return f"[{'█' * n}{'░' * (width - n)}] {frac * 100:3.0f}%"
+
+
+def _eta(elapsed: float, done: int, total: int) -> str:
+    if done <= 0 or elapsed <= 0:
+        return "?"
+    left = max(0.0, elapsed / done * (total - done))
+    return f"{left / 60:.0f} min left" if left >= 90 else f"{left:.0f}s left"
 
 
 def _daily(store: Store, target: str, table: str, fetch: Callable[[date], Result], persist: Callable[[Store, Result], int], *,
@@ -61,7 +77,11 @@ def _daily(store: Store, target: str, table: str, fetch: Callable[[date], Result
     rep = BackfillReport(target)
     have = _have_dates(store, table)
     t0, streak = clock(), 0
-    for d in _weekdays_back(start, days, ds.special_sessions(store)):
+    plan = list(_weekdays_back(start, days, ds.special_sessions(store)))
+    total, todo = len(plan), sum(1 for x in plan if x.isoformat() not in have)
+    if todo < total:
+        progress(f"   {target}: {total - todo} of {total} weekdays already stored, {todo} to fetch")
+    for i, d in enumerate(plan, 1):
         if clock() - t0 > budget_s:
             rep.stopped = f"time budget reached at {d}; run again to continue"
             break
@@ -69,11 +89,12 @@ def _daily(store: Store, target: str, table: str, fetch: Callable[[date], Result
             rep.skipped += 1
             continue
         res = fetch(d)
+        tried = rep.done + rep.holidays + len(rep.failed) + 1
         if res.ok:
             rep.rows += persist(store, res)
             rep.done += 1
             if rep.done % 25 == 0:
-                progress(f"   ...{target}: {rep.done} days stored, now at {d} ({clock() - t0:.0f}s)")
+                progress(f"   {_bar(i, total)}  {target}: {rep.done} stored, now at {d}, {_eta(clock() - t0, tried, todo)} ({clock() - t0:.0f}s)")
             streak = 0
             rep.oldest = d.isoformat()
             rep.newest = rep.newest or d.isoformat()
@@ -109,10 +130,13 @@ def backfill_prices(store, *, days=380, budget_s=3600, start=None, progress=_noo
     """One year of daily bars: NSE cash bhavcopy (all traded stocks) plus BSE for names NSE did not trade. Raw files are not
     kept for backfilled days. A BSE failure on a day is reported but does not throw away that day's NSE prices."""
     def fetch(d):
-        n = nse_archive.cm_bhavcopy(d, store=None)
+        legacy = d < UDIFF_FROM                                  # known not to exist: skip the guaranteed 404 and save ~1s a day
+        n = nse_archive.cm_bhavcopy_legacy(d, store=None) if legacy else nse_archive.cm_bhavcopy(d, store=None)
+        if not n.ok and not legacy and n.error.kind == ErrorKind.NOT_FOUND:     # before the UDiFF files existed (or a holiday: the legacy file is also missing then)
+            n, legacy = nse_archive.cm_bhavcopy_legacy(d, store=None), True
         if not n.ok:
             return n
-        b = bse.bhavcopy(d, store=None)
+        b = (bse.bhavcopy_legacy if legacy else bse.bhavcopy)(d, store=None)
         return Result(data={"nse": n.data, "bse": b.data if b.ok else [], "bse_error": None if b.ok else f"{b.error.kind}: {b.error.detail[:80]}"},
                       as_of=n.as_of)
 

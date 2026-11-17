@@ -1,0 +1,8 @@
+---
+description: Two stocks side by side, read-only. Usage /drishti-compare TCS INFY
+argument-hint: <stock A> <stock B>
+allowed-tools: mcp__drishti__gather_evidence, mcp__drishti__get_price_context, mcp__drishti__get_insider_cluster, mcp__drishti__get_pledge
+---
+Compare these two stocks side by side: $ARGUMENTS. For each, call gather_evidence (gate='entry', latest stored session). Show a compact table: trend, strength against the Nifty, one-month move, insider activity, pledge, and what is unknown. Then one sentence on which looks better supported by the evidence and how little or how much separates them. Make no call and log nothing.
+
+Format: follow the Drishti answer shape (and the active level, if one is loaded; otherwise use the investor level). Headline (**VERDICT** · subject · horizon vs yardstick · logged id or "not logged" · confidence), the read, then an evidence table (Signal | Reading | Against what | Visual | As of | Source | Says; 🟢 for, 🔴 against, 🟡 mixed, ⚪ unknown; unknowns as rows), with text visuals (bars █░, range gauge ├──●──┤, sparklines ▁▃▇, ▲▼ deltas) where they add information; for calls a scenario table (Case | Trigger | What the data would show | Call becomes), a track-record table when the log has related calls, a blind-spots table (Missing | Why it matters | How to fill it), and a final "Sources:" line naming each provider (NSE bhavcopy, NSE participant OI, NSE insider-trading disclosures, NSE shareholding filings, FRED, Yahoo Finance, MoSPI, CFTC, BSE, NSDL) with its as-of date. Every figure needs its date, its source and a yardstick; differences are computed. Compare = a column per stock; brief = Area | Reading | Against what | Visual | Source | Lean; review = Call | Date | Outcome | vs yardstick.

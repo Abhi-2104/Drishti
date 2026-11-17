@@ -35,6 +35,30 @@ def parse_cm_bhavcopy(body: bytes, *, min_rows: int = MIN_CM_ROWS) -> list[dict]
     return udiff.parse_cash(u.decode(u.unzip_single(body, label)), label, min_rows)
 
 
+LEGACY_MIN_ROWS = 1000   # 2,101 rows on 15 Sep 2021, 2,681 on 15 Mar 2024
+
+
+def parse_cm_bhavcopy_legacy(body: bytes, *, min_rows: int = LEGACY_MIN_ROWS) -> list[dict]:
+    """Pre-UDiFF NSE cash bhavcopy zip (cmDDMONYYYYbhav.csv, in use until 2024) -> the same row shape as parse_cm_bhavcopy.
+    It carries ISIN, so it joins like the new file. Rows without an ISIN are kept with isin None (the store skips them)."""
+    label = "cm_bhavcopy_legacy"
+    need = ["SYMBOL", "SERIES", "OPEN", "HIGH", "LOW", "CLOSE", "LAST", "PREVCLOSE", "TOTTRDQTY", "TOTTRDVAL", "TIMESTAMP", "TOTALTRADES", "ISIN"]
+    rows = []
+    for r in u.csv_rows(u.decode(u.unzip_single(body, label)), need, label):
+        rows.append({
+            "trade_date": u.iso_date(r["TIMESTAMP"], f"{label}.TIMESTAMP"), "symbol": r["SYMBOL"], "series": r["SERIES"],
+            "isin": u.opt_str(r["ISIN"]), "name": None, "instrument_id": r["SYMBOL"],
+            "open": u.num(r["OPEN"], "open"), "high": u.num(r["HIGH"], "high"), "low": u.num(r["LOW"], "low"),
+            "close": u.num(r["CLOSE"], "close"), "last": u.num(r["LAST"], "last"), "prev_close": u.num(r["PREVCLOSE"], "prev_close"),
+            "volume": u.integer(r["TOTTRDQTY"], "volume"), "turnover": u.num(r["TOTTRDVAL"], "turnover"),
+            "trades": u.integer(r["TOTALTRADES"], "trades"),
+        })
+    u.require_rows(rows, label, min_rows)
+    u.single_date(rows, "trade_date", label)
+    u.check_ohlc(rows, label)
+    return rows
+
+
 def parse_fo_bhavcopy(body: bytes, *, min_rows: int = MIN_FO_ROWS) -> list[dict]:
     """UDiFF F&O bhavcopy zip -> one row per contract. instrument_type: IDF/IDO index futures/options, STF/STO stock."""
     label = "fo_bhavcopy"
@@ -251,6 +275,14 @@ def _daily(label: str, d: date, url: str, expect: str, parse, store) -> Result:
 @guard
 def cm_bhavcopy(d: date, *, store=None) -> Result:
     return _daily("cm_bhavcopy", d, f"{ARCH}/cm/BhavCopy_NSE_CM_0_0_0_{_ymd(d)}_F_0000.csv.zip", "zip", parse_cm_bhavcopy, store)
+
+
+@guard
+def cm_bhavcopy_legacy(d: date, *, store=None) -> Result:
+    """The old-format cash bhavcopy, for sessions before the UDiFF file exists (before 2024). Same rows, same ISIN key."""
+    mon = d.strftime("%b").upper()
+    url = f"{ARCH}/historical/EQUITIES/{d:%Y}/{mon}/cm{d:%d}{mon}{d:%Y}bhav.csv.zip"
+    return _daily("cm_bhavcopy_legacy", d, url, "zip", parse_cm_bhavcopy_legacy, store)
 
 
 @guard

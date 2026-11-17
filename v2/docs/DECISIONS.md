@@ -56,3 +56,16 @@ records calls on dates whose outcomes do not exist yet.
 The universe is drawn once (seeded, from the 300 most liquid names) into `eval/forward_universe.json` and never changed.
 A run is refused if the last forward date is under 5 sessions earlier. Weekly dates with a 20/60-session horizon overlap, so
 read results by date block, not by case count. Prices must be refreshed first, or "latest session" is stale.
+
+## Long-history test of the rules (no model involved)
+
+    uv run drishti backfill index_closes --days 1900
+    uv run drishti backfill prices --days 1900 --budget-min 90      # resumable: rerun until it stops saying "stopped"
+    uv run drishti backfill corp_actions --days 1900                # so splits and bonuses are adjusted, not read as crashes
+    uv run drishti backfill adjustments
+    uv run drishti decisions history-coverage
+    uv run drishti decisions history                                # draws seeded cases, decides them with rules-v1
+    uv run drishti decisions history-report                         # per calendar year, against always-long
+
+Old insider and pledge readings do not exist, so on old dates the rules run on price, strength and macro only. Delisted names
+are registered in the master from the price files (source "bhavcopy") so they are not silently dropped.

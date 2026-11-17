@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("mcp", help="run the stdio MCP server")
     sub.add_parser("worker", help="run the scheduler loop")
+    sub.add_parser("selftest", help="exercise the whole chain against your database and print PASS/FAIL per step (read-only)")
     run = sub.add_parser("run", help="run one job by hand")
     run.add_argument("job")
     sub.add_parser("jobs", help="list jobs and their suggested schedule")
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
-    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-coverage")
     dc.add_argument("what")
     dc.add_argument("--gate", default=None)
     dc.add_argument("--start", default=None)
@@ -117,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         except ModuleNotFoundError as e:
             print(f"drishti mcp: the MCP SDK is not installed ({e}); run `uv sync`", file=sys.stderr)
             return 2
-        serve(cfg.db_path, cfg.signal_settings_path)    # stdout belongs to the protocol: everything else logs to stderr
+        serve(cfg.db_path, cfg.signal_settings_path, cfg.profile_path)    # stdout belongs to the protocol: everything else logs to stderr
         return 0
     if args.cmd == "data":
         import json as _json
@@ -141,6 +142,13 @@ def main(argv: list[str] | None = None) -> int:
             out["data"]["documents"] = {k: v[:4] for k, v in r.data.get("documents", {}).items()}
         print(_json.dumps(out, indent=1, default=str)[:6000])
         return 0 if r.ok else 1
+    if args.cmd == "selftest":
+        from . import selftest
+        try:
+            return selftest.run(load_settings())
+        except ConfigError as e:
+            print(f"drishti selftest: {e}", file=sys.stderr)
+            return 2
     if args.cmd == "decisions":
         from .store import Store
         try:
@@ -273,7 +281,20 @@ def _decisions(st, args, cfg) -> int:
                     horizons=hz, size=args.universe_size, seed=args.seed, min_gap=args.min_gap, profile=prof)
         print(_json.dumps(r, indent=1))
         return 0 if r["done"] else 1
-    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward", file=sys.stderr)
+    if w == "history-report":
+        from .decisions import history as hs
+        print(_json.dumps(hs.report(st, since=args.start, until=args.end), indent=1))
+        return 0
+    if w == "history-coverage":
+        from .decisions import history as hs
+        print(_json.dumps(hs.coverage(st), indent=1))
+        return 0
+    if w == "history":
+        from .decisions import history as hs
+        r = hs.run(st, out=Path(args.cases or "eval/history/cases.json"), start=args.start, end=args.end, every=args.every, n_stocks=args.n_stocks, seed=args.seed)
+        print(_json.dumps(r, indent=1))
+        return 0 if r["done"] else 1
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-coverage", file=sys.stderr)
     return 2
 
 

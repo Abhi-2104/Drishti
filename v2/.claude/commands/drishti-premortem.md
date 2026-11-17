@@ -1,0 +1,8 @@
+---
+description: Assume the call failed in 60 sessions: why? Usage /drishti-premortem TCS
+argument-hint: <stock name, symbol or ISIN>
+allowed-tools: mcp__drishti__gather_evidence, mcp__drishti__get_decisions
+---
+Run a pre-mortem on $ARGUMENTS. Call gather_evidence (gate='entry', latest stored session). Imagine it is 60 sessions later and an ENTER on this stock badly lagged the Nifty 50. Give the three most likely reasons, each tied to a reading in the evidence or a named gap in it, and one observable signal for each that I can watch. No call, nothing logged.
+
+Format: follow the Drishti answer shape (and the active level, if one is loaded; otherwise use the investor level). Headline (**VERDICT** · subject · horizon vs yardstick · logged id or "not logged" · confidence), the read, then an evidence table (Signal | Reading | Against what | Visual | As of | Source | Says; 🟢 for, 🔴 against, 🟡 mixed, ⚪ unknown; unknowns as rows), with text visuals (bars █░, range gauge ├──●──┤, sparklines ▁▃▇, ▲▼ deltas) where they add information; for calls a scenario table (Case | Trigger | What the data would show | Call becomes), a track-record table when the log has related calls, a blind-spots table (Missing | Why it matters | How to fill it), and a final "Sources:" line naming each provider (NSE bhavcopy, NSE participant OI, NSE insider-trading disclosures, NSE shareholding filings, FRED, Yahoo Finance, MoSPI, CFTC, BSE, NSDL) with its as-of date. Every figure needs its date, its source and a yardstick; differences are computed. Compare = a column per stock; brief = Area | Reading | Against what | Visual | Source | Lean; review = Call | Date | Outcome | vs yardstick.

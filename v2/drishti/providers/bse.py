@@ -39,6 +39,74 @@ def parse_bhavcopy(body: bytes, *, min_rows: int = MIN_BSE_ROWS) -> list[dict]:
     return rows
 
 
+LEGACY_URL = "https://www.bseindia.com/download/BhavCopy/Equity/EQ_ISINCODE_{ddmmyy}.zip"
+LEGACY_MIN_ROWS = 1500   # 3,728 on 15 Sep 2021, 4,269 on 15 Mar 2024
+
+
+def _fix_commas_in_names(text: str) -> str:
+    """A few company names in the old file hold a comma ("TIAA NC, ..."), which pushes every later column right. A data line with more
+    fields than the header gets its surplus fields folded back into the name (the second field), so the other columns line up."""
+    import csv
+    import io
+    lines = text.splitlines()
+    if not lines:
+        return text
+    width = len(next(csv.reader([lines[0]])))
+    out = [lines[0]]
+    for ln in lines[1:]:
+        f = next(csv.reader([ln])) if ln.strip() else []
+        if len(f) > width:
+            extra = len(f) - width
+            f = [f[0], " ".join(x.strip() for x in f[1:2 + extra])] + f[2 + extra:]
+            buf = io.StringIO()
+            csv.writer(buf, lineterminator="").writerow(f)
+            ln = buf.getvalue()
+        out.append(ln)
+    return "\n".join(out)
+
+
+def parse_bhavcopy_legacy(body: bytes, *, min_rows: int = LEGACY_MIN_ROWS) -> list[dict]:
+    """Pre-UDiFF BSE bhavcopy (EQ_ISINCODE_DDMMYY.zip) -> the same row shape as parse_bhavcopy. The file has no ticker symbol
+    (only a name cut at 12 characters), so `symbol` is None; the ISIN and BSE scrip code are the keys."""
+    from datetime import datetime
+    label = "bse_bhavcopy_legacy"
+    need = ["SC_CODE", "SC_NAME", "SC_GROUP", "OPEN", "HIGH", "LOW", "CLOSE", "LAST", "PREVCLOSE", "NO_TRADES", "NO_OF_SHRS", "NET_TURNOV",
+            "ISIN_CODE", "TRADING_DATE"]
+    rows, seen = [], set()
+    for r in u.csv_rows(_fix_commas_in_names(u.decode(u.unzip_single(body, label))), need, label):
+        code = r["SC_CODE"]
+        if not code.isdigit():
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: scrip code {code!r} is not numeric; layout changed?")
+        if code in seen:
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: scrip code {code} appears twice")
+        seen.add(code)
+        try:
+            day = datetime.strptime(r["TRADING_DATE"].title(), "%d-%b-%y").date().isoformat()
+        except ValueError:
+            raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: cannot read a date from {r['TRADING_DATE'][:20]!r}") from None
+        rows.append({
+            "trade_date": day, "symbol": None, "series": r["SC_GROUP"].strip() or "-", "isin": u.opt_str(r["ISIN_CODE"]),
+            "name": u.opt_str(r["SC_NAME"]), "instrument_id": code, "scrip_code": code,
+            "open": u.num(r["OPEN"], "open"), "high": u.num(r["HIGH"], "high"), "low": u.num(r["LOW"], "low"),
+            "close": u.num(r["CLOSE"], "close"), "last": u.num(r["LAST"], "last"), "prev_close": u.num(r["PREVCLOSE"], "prev_close"),
+            "volume": u.integer(r["NO_OF_SHRS"], "volume"), "turnover": u.num(r["NET_TURNOV"], "turnover"),
+            "trades": u.integer(r["NO_TRADES"], "trades"),
+        })
+    u.require_rows(rows, label, min_rows)
+    u.single_date(rows, "trade_date", label)
+    u.check_ohlc(rows, label)
+    return rows
+
+
+@guard
+def bhavcopy_legacy(d: date, *, store=None) -> Result:
+    url = LEGACY_URL.format(ddmmyy=d.strftime("%d%m%y"))
+    rows, got = u.load_parsed(store, "bse_bhavcopy_legacy", d, lambda: get(url, BSE_WWW, expect="zip"), parse_bhavcopy_legacy, SOURCE)
+    if rows[0]["trade_date"] != d.isoformat():
+        raise DrishtiError(ErrorKind.STALE, f"bse_bhavcopy_legacy: file for {d} contains data for {rows[0]['trade_date']}")
+    return Result(data=rows, as_of=d.isoformat(), sources=[got.source(SOURCE)])
+
+
 @guard
 def bhavcopy(d: date, *, store=None) -> Result:
     url = BHAVCOPY_URL.format(ymd=d.strftime("%Y%m%d"))

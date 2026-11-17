@@ -1,0 +1,8 @@
+---
+description: Explain a logged call and check whether it is going wrong. Usage /drishti-why TCS
+argument-hint: <stock name, symbol or ISIN>
+allowed-tools: mcp__drishti__get_decisions, mcp__drishti__get_price_context, mcp__drishti__score_decisions
+---
+Find the latest logged call on $ARGUMENTS with get_decisions. Explain it in plain words: the call, the thesis, how sure it was, the horizon and what would prove it wrong. Then check today's price context and tell me whether the invalidation has been triggered or the call is on track, and what the score says so far (score_decisions). If there is no logged call, say so.
+
+Format: follow the Drishti answer shape (and the active level, if one is loaded; otherwise use the investor level). Headline (**VERDICT** · subject · horizon vs yardstick · logged id or "not logged" · confidence), the read, then an evidence table (Signal | Reading | Against what | Visual | As of | Source | Says; 🟢 for, 🔴 against, 🟡 mixed, ⚪ unknown; unknowns as rows), with text visuals (bars █░, range gauge ├──●──┤, sparklines ▁▃▇, ▲▼ deltas) where they add information; for calls a scenario table (Case | Trigger | What the data would show | Call becomes), a track-record table when the log has related calls, a blind-spots table (Missing | Why it matters | How to fill it), and a final "Sources:" line naming each provider (NSE bhavcopy, NSE participant OI, NSE insider-trading disclosures, NSE shareholding filings, FRED, Yahoo Finance, MoSPI, CFTC, BSE, NSDL) with its as-of date. Every figure needs its date, its source and a yardstick; differences are computed. Compare = a column per stock; brief = Area | Reading | Against what | Visual | Source | Lean; review = Call | Date | Outcome | vs yardstick.
