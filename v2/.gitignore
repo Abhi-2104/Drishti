@@ -9,3 +9,13 @@ tests/fixtures/
 
 # Evaluation runs (case files, evidence bundles, agent answers) hold stored market data: never committed
 eval/
+
+# Kept on the laptop only (19 Nov 2026): tests, exploration probes, one-off experiment tooling, superseded plans/handoffs.
+# Nothing here is needed to install or run Drishti. Files stay on disk; they are just not on GitHub.
+tests/
+phase0/
+scripts/*
+!scripts/register-tasks.ps1
+PLAN-P1.md
+HANDOFF-2026-11-08.md
+HANDOFF-2026-11-18.md
