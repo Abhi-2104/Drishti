@@ -102,9 +102,10 @@ def key_file(out_dir: Path) -> Path:
 
 
 def import_answers(store, key_path: Path, answers_path: Path, *, agent: str, model: str) -> dict:
-    """Take an author's answers (one JSON object per line: case_id, action, horizon_days, confidence, thesis, invalidation, signals)
-    and append them to the log. The stock comes from the key file, so a blind author never handles identities. Bad answers are
-    reported with the reason, not fixed up."""
+    """Take an author's answers (one JSON object per line: case_id, action, horizon_days, confidence, thesis, invalidation, signals,
+    and optionally supersedes = the id of this author's earlier call on the same case that the line corrects) and append them to
+    the log. The stock comes from the key file, so a blind author never handles identities. Bad answers are reported with the
+    reason, not fixed up. A correction never edits the old row: the log keeps both and shows only the newer one."""
     key = json.loads(Path(key_path).read_text(encoding="utf-8"))
     n, rejected = 0, []
     for line_no, line in enumerate(Path(answers_path).read_text(encoding="utf-8").splitlines(), 1):
@@ -121,7 +122,8 @@ def import_answers(store, key_path: Path, answers_path: Path, *, agent: str, mod
             continue
         r = log.record(store, gate=c["gate"], as_of=c["as_of"], action=str(a.get("action", "")), horizon_days=c["horizon_days"], thesis=a.get("thesis", ""),
                        agent=agent, model=model, signals_cited=a.get("signals") or [], isin=c["isin"], symbol=c["symbol"],
-                       confidence=a.get("confidence"), invalidation=a.get("invalidation"), bundle_sha=c["bundle_sha"])
+                       confidence=a.get("confidence"), invalidation=a.get("invalidation"), bundle_sha=c["bundle_sha"],
+                       supersedes=a.get("supersedes"))
         if r.ok:
             n += 1
         else:

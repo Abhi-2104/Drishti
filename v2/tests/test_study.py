@@ -139,3 +139,24 @@ def test_cli_portfolio_sim_needs_the_rows_first(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("DRISHTI_HOME", str(tmp_path / "home"))
     assert cli.main(["decisions", "portfolio-sim", "--out", str(tmp_path / "none")]) == 2
     assert "signal-study" in capsys.readouterr().err
+
+
+def test_import_can_correct_an_earlier_call_without_editing_it(st, tmp_path):
+    from drishti.decisions import cases as cs, log
+    d = DAYS[250]
+    case = {"case_id": f"exit-{d}-{UP}", "gate": "exit", "as_of": d, "isin": UP, "symbol": "RISER", "horizon_days": 60}
+    key = tmp_path / "k.json"
+    key.write_text(json.dumps({case["case_id"]: {**case, "bundle_sha": "x"}}), encoding="utf-8")
+    a = {"case_id": case["case_id"], "action": "HOLD", "horizon_days": 60, "confidence": 0.6, "thesis": "Uptrend and beating the index.",
+         "invalidation": "closes below the 50-day average", "signals": ["price_context"]}
+    ans = tmp_path / "a.jsonl"
+    ans.write_text(json.dumps(a) + "\n", encoding="utf-8")
+    assert cs.import_answers(st, key, ans, agent="claude", model="m")["recorded"] == 1
+    again = cs.import_answers(st, key, ans, agent="claude", model="m")
+    assert again["recorded"] == 0 and "supersedes=" in again["rejections"][0]["why"]
+    old = log.current(st, agent="claude")[0]["id"]
+    ans.write_text(json.dumps({**a, "confidence": 0.65, "thesis": "Uptrend, beating the index, and a longer reason.", "supersedes": old}) + "\n", encoding="utf-8")
+    assert cs.import_answers(st, key, ans, agent="claude", model="m")["recorded"] == 1
+    now = log.current(st, agent="claude")
+    assert len(now) == 1 and now[0]["confidence"] == 0.65 and now[0]["supersedes"] == old
+    assert st.query("SELECT COUNT(*) AS n FROM decision WHERE agent='claude'")[0]["n"] == 2       # both rows kept
