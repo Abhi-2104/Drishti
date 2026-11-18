@@ -7,3 +7,6 @@ venv/
 *Zone.Identifier
 *.log
 scratchpad/
+
+# personal holdings and broker statements: never commit
+private/
