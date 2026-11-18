@@ -458,21 +458,38 @@ def build_server(open_store: Callable[[], Store], load_profile: Callable[[], obj
 
     # --- evidence layer (E1): documents, and claims tied to verbatim quotes -------------------------------------------------
     @srv.tool()
-    def add_evidence_source(kind: str, title: str, published_at: str, text: str | None = None, path: str | None = None,
-                            query: str | None = None, url: str | None = None) -> dict:
-        """Store a document as evidence: an earnings-call transcript, annual report, announcement, results, prospectus or rating
-        report. Give its full `text` (or a local `path` to a .txt file), the company (`query`: ISIN or symbol) and `published_at`, the
-        date it became public: queries as of an earlier day never see it. Returns a source_id for record_evidence."""
+    def find_filings(query: str, kind: str = "concall", days: int = 400, as_of: str | None = None, limit: int = 12) -> dict:
+        """A company's documents of one kind from the announcements stored in the database: kind = concall (transcripts), results,
+        annual_report or presentation. Returns published date, headline and PDF link, newest first; pass a link to add_evidence_source."""
         from . import evidence as ev
         with open_store() as st:
             try:
-                body = text if text is not None else (Path(path).read_text(encoding="utf-8", errors="replace") if path else None)
-                if not body:
-                    raise DrishtiError(ErrorKind.REJECTED, "give the document's text or a path to a text file")
+                return _env(ev.find_filings(st, isin=_stock_isin(st, query), kind=kind, days=days, on=as_of, limit=limit))
+            except DrishtiError as e:
+                return _env(Result(error=e))
+
+    @srv.tool()
+    def add_evidence_source(kind: str, title: str, published_at: str, text: str | None = None, path: str | None = None,
+                            query: str | None = None, url: str | None = None) -> dict:
+        """Store a document as evidence: an earnings-call transcript, annual report, announcement, results, prospectus or rating
+        report. Give its full `text`, or a local `path` (.txt, .md or .pdf), or a PDF `url` on an NSE or BSE host. `query` is the company
+        (ISIN or symbol; leave empty for a company that is not listed yet, such as an IPO). `published_at` is the date it became public:
+        queries as of an earlier day never see it. Returns a source_id; read it with read_evidence_source, then record claims."""
+        from . import evidence as ev
+        with open_store() as st:
+            try:
                 isin = _stock_isin(st, query) if query else None
-                return _env(ev.add_source(st, text=body, kind=kind, title=title, published_at=published_at, isin=isin, url=url))
-            except (DrishtiError, OSError) as e:
-                return _env(Result(error=e if isinstance(e, DrishtiError) else DrishtiError(ErrorKind.NOT_FOUND, str(e))))
+                return _env(ev.ingest(st, kind=kind, title=title, published_at=published_at, isin=isin, url=url, path=path, text=text))
+            except DrishtiError as e:
+                return _env(Result(error=e))
+
+    @srv.tool()
+    def read_evidence_source(source_id: str, offset: int = 0, length: int = 12000) -> dict:
+        """Read a stored document in windows of up to 30,000 characters. Follow next_offset until it is null. Quotes you record must be
+        copied exactly from this text."""
+        from . import evidence as ev
+        with open_store() as st:
+            return _env(ev.read_source(st, source_id, offset=offset, length=length))
 
     @srv.tool()
     def validate_claim(source_id: str, quote: str) -> dict:
@@ -502,6 +519,23 @@ def build_server(open_store: Callable[[], Store], load_profile: Callable[[], obj
             except DrishtiError as e:
                 return _env(Result(error=e))
 
+    @srv.tool()
+    def spot_check_evidence(n: int = 20, seed: int = 7) -> dict:
+        """E4: a random sample of recorded claims, each with its quote in context, for a person to judge. Also re-proves every stored quote
+        against its document (any that no longer matches is listed as broken) and reports the review score so far."""
+        from . import evidence as ev
+        with open_store() as st:
+            a, smp, sm = ev.audit(st), ev.sample_claims(st, n=n, seed=seed), ev.review_summary(st)
+            return _env(Result(data={"integrity": a.data, "sample": smp.data, "review_so_far": sm.data}))
+
+    @srv.tool()
+    def review_evidence(claim_id: str, verdict: str, reviewer: str, note: str | None = None) -> dict:
+        """E4: record a person's verdict on one claim: supported, overstated (the quote says less), wrong or unclear. The reviewer must be
+        a person, not the claim's author."""
+        from . import evidence as ev
+        with open_store() as st:
+            return _env(ev.review_claim(st, claim_id=claim_id, verdict=verdict, reviewer=reviewer, note=note))
+
     # --- slash commands: MCP prompts show up as /mcp__drishti__<name> in Claude Code, and in any client that lists prompts ---
     _RULES = ("Rules: use only what the evidence bundle holds; anything under 'unknown' is unknown, not neutral; do not use memory of events after "
               "the as_of date. A call needs confidence (0.50-0.99, the probability it turns out right over the horizon), a thesis in your own words, "
@@ -524,6 +558,36 @@ def build_server(open_store: Callable[[], Store], load_profile: Callable[[], obj
     def p_macro(horizon_days: int = 60) -> str:
         return (f"Judge the market regime. Call gather_evidence with gate='macro', as_of = the latest stored session. Decide RISK_ON, NEUTRAL or "
                 f"RISK_OFF over {horizon_days} sessions (the Nifty 50 against cash). {_RULES}")
+
+    @srv.prompt(name="concall", description="Read a company's latest earnings-call transcript and record what management said, with verbatim quotes.")
+    def p_concall(stock: str, quarters: int = 1) -> str:
+        return (f"Read the latest {quarters} earnings-call transcript(s) of {stock} and record what matters. 1) find_filings with query='{stock}', kind='concall'. "
+                "If none is listed, say so and stop (ask me for a link). 2) For each transcript, newest first: add_evidence_source with the link, kind='concall', "
+                "the headline as title, published_at = its published date and query set to the stock. 3) Read it completely with read_evidence_source, "
+                "following next_offset to the end. 4) Record 8-20 claims with record_evidence, each with an EXACT quote (20-800 characters, copied from the text "
+                "you just read) and a topic (guidance, demand, margins, capex, debt, orders, pricing, competition, governance, management, risk, accounting, "
+                f"regulation) and polarity (+1 good for the stock, -1 bad, 0 neutral); author = your model id. If record_evidence refuses a quote, re-read the "
+                "passage and quote it exactly, or drop the claim; never paraphrase inside a quote. Capture what CHANGED (guidance raised or cut, new risks, "
+                "evasive answers on a question that was asked twice) more than what is routine. 5) With 2+ transcripts, compare them: what moved. 6) Answer in "
+                "plain words: a headline, the five claims that matter most each with its quote and date, what management avoided, and what to watch next quarter. "
+                "Say the evidence is claims read from documents, not a prediction, and give the source ids.")
+
+    @srv.prompt(name="ipo", description="Read an IPO prospectus (RHP/DRHP) and record the facts that decide whether it is worth subscribing.")
+    def p_ipo(company: str, prospectus_url_or_path: str) -> str:
+        return (f"Read the prospectus of {company} ({prospectus_url_or_path}). 1) add_evidence_source with kind='prospectus', that link or path, title "
+                f"'{company} prospectus', published_at = the filing date shown on its first pages (ask me if you cannot find it) and no query (it has no listed "
+                "stock yet). 2) Read it completely with read_evidence_source. 3) Record 12-25 claims with record_evidence and exact quotes on: size and split "
+                "(fresh issue vs offer for sale; who is selling), use of proceeds (debt repayment vs growth), valuation basis and peer comparison, promoter holding "
+                "after the issue, customer or supplier concentration, related-party dealings, litigation and regulatory actions, debt and contingent liabilities, "
+                "auditor remarks or restatements, and any growth claim that rests on one year. topic and polarity as in /concall; author = your model id. 4) "
+                "Check get_calendar for the issue dates and price band if listed. 5) Answer: a headline, a table of Area | Fact | Quote | Page-ish location | "
+                "Good/Bad, the three biggest risks and what would change the view. Subscribe or skip is the user's call: lay out the evidence, do not decide.")
+
+    @srv.prompt(name="spotcheck", description="Check a sample of recorded evidence claims against their quotes.")
+    def p_spotcheck(n: int = 20) -> str:
+        return (f"Call spot_check_evidence with n={n}. Report the integrity result first (any broken quote is a serious problem). Then go through the sample "
+                "with me one claim at a time: show the claim, the quote and its context, give your own reading (supported / overstated / wrong / unclear) "
+                "and ask for mine. Record MY verdict with review_evidence (reviewer = my name, never yours). End with the review score so far.")
 
     @srv.prompt(name="health", description="What data is fresh and what failed, in plain words.")
     def p_health() -> str:

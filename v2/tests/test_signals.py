@@ -496,3 +496,19 @@ def test_pledge_without_a_promoter_still_reports_an_empty_flag_list(st):
     shp(st, "INE202A01018", "2026-09-30", 0.0, promoter_shares=0)
     s = disclosure.pledge(st, "INE202A01018", date(2026, 11, 8)).data
     assert "not applicable" in s["label"] and s["details"]["flags"] == []
+
+
+def test_screen_drops_names_too_thinly_traded_to_act_on_and_says_so(st):
+    shp(st, "INE002A01018", "2026-06-30", 24.0)
+    shp(st, "INE002A01018", "2026-09-30", 31.5)
+    shp(st, "INE555A01017", "2026-06-30", 24.0)
+    shp(st, "INE555A01017", "2026-09-30", 31.5)
+    assert {x["isin"] for x in disclosure.screen(st, date(2026, 11, 8))["pledge"]} == {"INE002A01018", "INE555A01017"}    # no prices stored: no filter
+    ds.ensure(st, "price_eod")
+    rows = [("INE002A01018", 5e9)] + [(f"INE{i:03d}B01011", 1e8) for i in range(900)] + [("INE555A01017", 1e3)]
+    st.upsert("price_eod", [{"trade_date": "2026-11-06", "isin": i, "exchange": "NSE", "series": "EQ", "symbol": i[-6:], "open": 1, "high": 1, "low": 1,
+                             "close": 1, "prev_close": 1, "volume": 1, "turnover": t, "trades": 1} for i, t in rows],
+              key=["trade_date", "isin", "exchange", "series"])
+    scr = disclosure.screen(st, date(2026, 11, 8))
+    assert [x["isin"] for x in scr["pledge"]] == ["INE002A01018"] and scr["universe"]["excluded_illiquid"] == 1
+    assert len(disclosure.screen(st, date(2026, 11, 8), tradeable_only=False)["pledge"]) == 2

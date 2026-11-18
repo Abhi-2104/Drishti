@@ -176,3 +176,38 @@ def test_signal_tools(st):
     assert r["error"] is None and r["data"]["details"]["isin"] == "INE002A01018"
     assert m.tool_disclosure_screen(st, "2026-11-08")["error"] is None
     json.dumps(r)
+
+
+def test_evidence_e2_e4_tools_and_prompts_through_the_server(st):
+    pytest.importorskip("mcp")
+    from drishti.store import datasets as ds
+    ds.ensure(st, "announcement")
+    st.upsert("announcement", [{"source": "NSE", "id": "1", "published": "2026-11-05T18:00:00", "symbol": "RELIANCE", "isin": "INE002A01018",
+                                "scrip_code": None, "company": "Reliance", "category": "Analysts/Institutional Investor Meet/Con. Call Updates",
+                                "subcategory": None, "headline": "Transcript of earnings call Q2", "text": None,
+                                "url": "https://nsearchives.nseindia.com/c/t.pdf", "critical": 0, "has_xbrl": 0}], key=["source", "id"])
+    srv = m.build_server(lambda: _Keep(st))
+    text = ("CFO: We are revising our full-year revenue growth guidance to 8-10% from the earlier 12-15% because exports slowed. " * 6)
+
+    def dump(x):
+        return json.dumps(x.model_dump(mode="json"), default=str)
+
+    async def go():
+        f = dump(await srv.call_tool("find_filings", {"query": "RELIANCE", "kind": "concall", "as_of": "2026-11-08"}))
+        a = dump(await srv.call_tool("add_evidence_source", {"kind": "concall", "title": "Q2 call", "published_at": "2026-11-05", "text": text,
+                                                             "query": "RELIANCE"}))
+        sid = re.search(r"src-[0-9a-f]{16}", a).group(0)
+        rd = dump(await srv.call_tool("read_evidence_source", {"source_id": sid, "offset": 0, "length": 600}))
+        rec = dump(await srv.call_tool("record_evidence", {"source_id": sid, "claim": "FY revenue growth guidance cut to 8-10%",
+                                                          "quote": "revising our full-year revenue growth guidance to 8-10%", "topic": "guidance",
+                                                          "polarity": -1, "author": "claude/test"}))
+        cid = re.search(r"clm-[0-9a-f]{16}", rec).group(0)
+        chk = dump(await srv.call_tool("spot_check_evidence", {"n": 5}))
+        own = dump(await srv.call_tool("review_evidence", {"claim_id": cid, "verdict": "supported", "reviewer": "claude/test"}))
+        rev = dump(await srv.call_tool("review_evidence", {"claim_id": cid, "verdict": "supported", "reviewer": "Abhi"}))
+        prompts = {p.name for p in await srv.list_prompts()}
+        return f, rd, chk, own, rev, prompts
+    f, rd, chk, own, rev, prompts = asyncio.run(go())
+    assert "t.pdf" in f and "next_offset" in rd and "integrity" in chk and "clm-" in chk
+    assert "REJECTED" in own and "supported" in rev and "REJECTED" not in rev
+    assert {"concall", "ipo", "spotcheck"} <= prompts

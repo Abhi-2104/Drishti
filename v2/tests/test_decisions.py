@@ -597,3 +597,21 @@ def test_breakdown_reads_rules_reasons():
     t = "+2 close above the 50-day and 200-day averages, 50 above 200; -1 -3.4% against the Nifty over ~3 months; +1 macro tide +2"
     assert (b._trend(t), b._strength(t), b._macro(t)) == ("uptrend", "lagging Nifty", "macro supportive")
     assert b._tercile({"a": 1.0, "b": 2.0, "c": 3.0}) == {"a": "weak", "b": "middle", "c": "strong"}
+
+
+def test_bundle_carries_point_in_time_evidence_claims_only_when_not_blind_and_only_when_there_are_some(st):
+    from drishti import evidence as evl
+    before = gather.gather(st, "entry", AS_OF, isin=UP).data
+    assert "evidence_claims" not in before["evidence"]["stock"]               # nothing recorded: the bundle (and its hash) is unchanged
+    text = "The CFO said revenue grew 14 percent and we are cutting guidance to 8 to 10 percent for the full year because exports slowed. " * 2
+    sid = evl.add_source(st, text=text, kind="concall", title="Q2 call", published_at=DAYS[240], isin=UP).data["source_id"]
+    assert evl.record_evidence(st, source_id=sid, claim="Guidance cut to 8-10%", quote="we are cutting guidance to 8 to 10 percent for the full year",
+                               topic="guidance", polarity=-1, author="claude/test").ok
+    after = gather.gather(st, "entry", AS_OF, isin=UP).data
+    cl = after["evidence"]["stock"]["evidence_claims"]
+    assert len(cl) == 1 and cl[0]["topic"] == "guidance" and cl[0]["polarity"] == -1 and "cutting guidance" in cl[0]["quote"]
+    assert after["bundle_sha"] != before["bundle_sha"]
+    early = gather.gather(st, "entry", DAYS[200], isin=UP).data               # the call was not public yet
+    assert "evidence_claims" not in early["evidence"]["stock"]
+    blind = gather.gather(st, "entry", AS_OF, isin=UP, blind=True).data
+    assert "evidence_claims" not in str(blind)                                 # blind tests never carry documents (title and date would identify the case)

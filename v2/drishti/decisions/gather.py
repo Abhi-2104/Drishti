@@ -74,6 +74,12 @@ def gather(store, gate: str, as_of: str, *, isin: str | None = None, blind: bool
                 ev["stock"]["signals"][n] = _compact(r.data, full=True)
             else:
                 ev["unknown"].append({"signal": n, "why": r.error.detail[:200]})
+        if not blind:            # claims read from documents (evidence layer): point-in-time, each with its verbatim quote; absent when there are none
+            from .. import evidence as _evidence
+            q = _evidence.query_evidence(store, isin=isin, on=as_of, limit=15)
+            if q.ok and q.data["claims"]:
+                ev["stock"]["evidence_claims"] = [{"claim": c["claim"], "topic": c["topic"], "polarity": c["polarity"], "published_at": c["published_at"],
+                                                   "source": f"{c['kind']}: {c['title']}", "quote": c["quote"]} for c in q.data["claims"]]
     for n in MARKET_SIGNALS:
         r = signals.compute(store, n, on)
         if r.ok:

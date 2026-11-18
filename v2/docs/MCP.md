@@ -93,4 +93,27 @@ profile layer, which only decisions and tools may read.
 | `query_evidence` | Claims with quotes and documents, newest first; `as_of` keeps it point-in-time (only documents public by then). |
 
 Extraction is done by whoever calls `record_evidence` (Claude in the session, or a person); the store guarantees only that every
-quote exists in its document. PDF ingestion (E2) and `/drishti-concall`, `/ipo` (E3) build on these.
+quote exists in its document.
+
+### E2 to E4 (18 Nov 2026)
+
+| Tool / prompt | Does |
+|---|---|
+| `add_evidence_source` (extended) | Also takes a local `.pdf` path or a PDF `url` on an NSE or BSE host (https only; any other host is `REJECTED`). A PDF with no text layer (a scan) is `EMPTY`; reading PDFs needs `pypdf` (in `pyproject.toml`; `uv run` installs it). `query` may be empty for an unlisted company (an IPO). |
+| `find_filings` | A company's concall transcripts / results / annual reports / presentations from the announcements already stored: date, headline, PDF link. Audio links and date notices are left out. |
+| `read_evidence_source` | A stored document in windows (up to 30,000 characters); follow `next_offset`. A quote must be copied exactly from this text. |
+| `spot_check_evidence` | Re-proves every stored quote against its document (`broken` = the words are gone; `moved` = still there, shifted) and returns a random sample of claims with their quotes in context. |
+| `review_evidence` | A person's verdict on a claim: `supported`, `overstated`, `wrong`, `unclear`. A claim's author cannot review it. The share judged supported is the extraction's precision (under 20 reviews = too few to say). |
+| prompts `/concall`, `/ipo`, `/spotcheck` | Read the latest earnings-call transcript, read an IPO prospectus, or run the spot-check. Slash-command versions: `/drishti-concall`, `/drishti-ipo`, `/drishti-spotcheck`. |
+
+Claims also reach decisions: a non-blind `gather_evidence` bundle for a stock carries up to 15 recent claims (point-in-time, each with its
+quote) under `stock.evidence_claims`, and carries nothing when there are none, so existing bundle hashes do not change. Blind and masked
+tests never carry documents (a title and a date would identify the case).
+
+CLI: `drishti evidence audit | sample | summary`, `drishti storage` (rows and size per table).
+
+## Tradeable universe
+
+`drishti/universe.py`: the 800 most liquid NSE names by 45-day average turnover. `screen_disclosures` drops names outside it and reports
+`universe.excluded_illiquid`; the watchlist and holdings are never filtered. `data_health` now also lists the newest date in each
+stored table (prices, delivery, participant OI, index closes, deals, announcements, insider filings) with `stale` true past 4 days.

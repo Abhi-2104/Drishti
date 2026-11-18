@@ -72,6 +72,11 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--critiques", default=None, help="audit: critiques JSON-lines file")
     dc.add_argument("--a", default=None, help="compare/audit: first author, agent/model")
     dc.add_argument("--b", default=None, help="compare: second author; audit: the revised author (optional)")
+    evp = sub.add_parser("evidence", help="evidence layer checks: audit (re-prove every stored quote) | sample (claims to check by eye) | summary (review score)")
+    evp.add_argument("what")
+    evp.add_argument("--n", type=int, default=20)
+    evp.add_argument("--seed", type=int, default=7)
+    sub.add_parser("storage", help="how big the database is and which tables take the space")
     sub.add_parser("init", help="create the settings/profile templates (never overwrites)")
     sub.add_parser("paths", help="show where settings, profile and the database live")
     args = ap.parse_args(argv)
@@ -150,6 +155,27 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as e:
             print(f"drishti selftest: {e}", file=sys.stderr)
             return 2
+    if args.cmd in ("evidence", "storage"):
+        import json as _json
+        from .store import Store
+        try:
+            cfg = load_settings()
+        except ConfigError as e:
+            print(f"drishti {args.cmd}: {e}", file=sys.stderr)
+            return 2
+        with Store(cfg.db_path) as st:
+            if args.cmd == "storage":
+                from . import storage
+                print(_json.dumps(storage.report(st), indent=1))
+                return 0
+            from . import evidence as ev
+            fns = {"audit": lambda: ev.audit(st), "sample": lambda: ev.sample_claims(st, n=args.n, seed=args.seed), "summary": lambda: ev.review_summary(st)}
+            if args.what not in fns:
+                print(f"drishti evidence: use one of {', '.join(fns)}", file=sys.stderr)
+                return 2
+            r = fns[args.what]()
+            print(_json.dumps(r.to_dict(), indent=1, default=str))
+            return 0 if r.ok and not (args.what == "audit" and r.data["broken"]) else 1
     if args.cmd == "decisions":
         from .store import Store
         try:

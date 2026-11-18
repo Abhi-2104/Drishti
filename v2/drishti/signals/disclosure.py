@@ -107,7 +107,7 @@ def pledge(store, isin: str, on=None):
                      details={"isin": isin, "flags": flags, "previous_as_on": prev["as_on"] if prev else None}))
 
 
-def screen(store, on=None, *, limit: int = 30) -> dict:
+def screen(store, on=None, *, limit: int = 30, tradeable_only: bool = True) -> dict:
     """Market-wide discovery for /brief and /screen: names with an insider cluster/size buying, and names with pledge flags."""
     p_i, _ = params("insider_cluster")
     p_p, _ = params("pledge")
@@ -128,6 +128,14 @@ def screen(store, on=None, *, limit: int = 30) -> dict:
             if s.ok and s.data["details"].get("flags"):
                 out["pledge"].append({"isin": r["isin"], "symbol": r["symbol"], "label": s.data["label"],
                                       "pledged_pct": s.data["components"][0]["value"]})
+    if tradeable_only:        # drop names too thinly traded to act on (see universe.py); report how many, never hide that it happened
+        from .. import universe
+        ok_isins = universe.liquid(store, d)
+        if ok_isins is not None:
+            before = len(out["insider"]) + len(out["pledge"])
+            out["insider"] = [x for x in out["insider"] if x["isin"] in ok_isins]
+            out["pledge"] = [x for x in out["pledge"] if x["isin"] in ok_isins]
+            out["universe"] = {"filter": f"top {universe.TOP} NSE names by turnover", "excluded_illiquid": before - len(out["insider"]) - len(out["pledge"])}
     out["insider"].sort(key=lambda x: -(x["buy_value_inr"] + x["sell_value_inr"]))
     out["pledge"].sort(key=lambda x: -(x["pledged_pct"] or 0))
     out["insider"], out["pledge"] = out["insider"][:limit], out["pledge"][:limit]

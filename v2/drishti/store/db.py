@@ -319,4 +319,22 @@ class Store:
                               "GROUP BY error_kind ORDER BY n DESC", (since,))
         bad = [j for j in jobs if j["status"] == "failed"] + [c for c in canaries if not c["ok"]]
         return {"status": "degraded" if bad else "ok", "generated_at": now.isoformat(timespec="seconds"),
-                "jobs": jobs, "datasets": datasets, "canaries": canaries, "failures_24h": failures}
+                "jobs": jobs, "datasets": datasets, "canaries": canaries, "failures_24h": failures, "tables": self._table_freshness(now)}
+
+    # the tables backfills and jobs write straight to (no raw blob), with the newest date in each: the only way to see that prices are current
+    _FRESH = (("price_eod", "trade_date"), ("delivery", "trade_date"), ("participant_oi", "trade_date"), ("index_close", "trade_date"),
+              ("deal", "trade_date"), ("announcement", "published"), ("insider_event", "filed_at"))
+
+    def _table_freshness(self, now: datetime) -> list[dict]:
+        have = {r["name"] for r in self.query("SELECT name FROM sqlite_master WHERE type='table'")}
+        out = []
+        for t, col in self._FRESH:
+            if t not in have:
+                continue
+            latest = self.query(f"SELECT MAX({col}) AS d FROM {t}")[0]["d"]
+            try:
+                age = (now.date() - date.fromisoformat(str(latest)[:10])).days if latest else None
+            except ValueError:
+                age = None
+            out.append({"table": t, "newest": str(latest)[:10] if latest else None, "age_days": age, "stale": age is None or age > 4})
+        return out
