@@ -253,10 +253,18 @@ def parse_fo_ban(body: bytes) -> tuple[str, list[str]]:
     return u.iso_date(m.group(1), f"{label}.title"), symbols
 
 
+NO_RECORDS = "NO RECORDS"   # NSE's placeholder row on a day with no deals (block.csv, 18 Nov 2026): header + "NO RECORDS,,,,,,"
+
+
 def _parse_deals(body: bytes, label: str) -> list[dict]:
+    """Rows of a bulk/block deal file. A file whose only row is NSE's 'NO RECORDS' placeholder (every other field blank) is a
+    real day without deals and returns []; any other blank or odd side is still a PARSE_FAIL."""
+    raw = list(u.csv_rows(u.decode(body), ["Date", "Symbol", "Security Name", "Client Name", "Buy/Sell", "Quantity Traded",
+                                           "Trade Price / Wght. Avg. Price"], label))
+    if len(raw) == 1 and raw[0]["Date"].strip().upper() == NO_RECORDS and not any((v or "").strip() for k, v in raw[0].items() if k != "Date"):
+        return []
     rows = []
-    for r in u.csv_rows(u.decode(body), ["Date", "Symbol", "Security Name", "Client Name", "Buy/Sell", "Quantity Traded",
-                                         "Trade Price / Wght. Avg. Price"], label):
+    for r in raw:
         side = r["Buy/Sell"].strip().upper()
         if side not in ("BUY", "SELL"):
             raise DrishtiError(ErrorKind.PARSE_FAIL, f"{label}: unexpected side {side!r}")
@@ -467,6 +475,8 @@ def _snapshot(label: str, url: str, parse, store, max_age_days: int) -> Result:
     """Undated 'latest' file (bulk/block deals): always fetched, freshness judged by the newest Date inside."""
     got = get(url, NSE_ARCHIVE, expect="csv")
     rows = parse(got.body)
+    if rows == []:      # NSE says "NO RECORDS": a genuine day without deals. The file carries no date, so no as_of is claimed.
+        return Result(data=[], as_of=None, sources=[got.source(SOURCE)])
     newest = check_fresh(rows, "trade_date", max_age_days, label)
     if store is not None:
         store.put_blob(label, newest, got, SOURCE)

@@ -544,3 +544,13 @@ def test_participant_oi_real_2017_files_with_wrong_totals_are_read_from_their_co
         assert r["total_long"] == sum(r[k] for k in n._LONGS) and r["total_short"] == sum(r[k] for k in n._SHORTS)
     tot = next(r for r in rows if r["client_type"] == "TOTAL")
     assert abs(tot["total_long"] - tot["total_short"]) <= 3                      # a market's longs and shorts match: the repair makes that true
+
+
+def test_deal_file_with_nse_no_records_placeholder_is_a_real_empty_day():
+    # block.csv on 18 Nov 2026, byte for byte
+    body = b"Date,Symbol,Security Name,Client Name,Buy/Sell,Quantity Traded,Trade Price / Wght. Avg. Price\nNO RECORDS,,,,,,\n"
+    assert n.parse_block_deals(body) == [] and n.parse_bulk_deals(body) == []
+    # the placeholder with anything else filled in, or a blank side on a real row, is still refused
+    assert kind(n.parse_block_deals, body.replace(b"NO RECORDS,,", b"NO RECORDS,ABC,")) == ErrorKind.PARSE_FAIL
+    head = body.splitlines()[0]
+    assert kind(n.parse_block_deals, head + b"\n18-Nov-2026,ABC,Abc Ltd,Someone,,100,10.5\n") == ErrorKind.PARSE_FAIL
