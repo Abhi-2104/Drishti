@@ -381,3 +381,166 @@ def test_latest_gives_up_with_not_found():
     calls = []
     r = u.latest(lambda d: (calls.append(d), Result(error=DrishtiError(ErrorKind.NOT_FOUND, "404")))[1], start=date(2026, 11, 6), max_back=3)
     assert r.error.kind == ErrorKind.NOT_FOUND and len(calls) == 3
+
+
+def test_participant_oi_reads_the_old_title_variants():
+    # real title lines: 19 Aug 2024, 9 Apr 2020, 5 May 2020, 15 May 2020
+    text = raw("fao_participant_oi_06112026.csv").decode("utf-8-sig")
+    body = text.splitlines()[1:]
+    for title, want in (('Participant wise Open Interest (no. of contracts) in Equity Derivatives as on Aug 19,"2024""""",,,,,,,,,,,,,', "2024-08-19"),
+                        ("Participant wise Open Interest (no. of contracts) in Equity Derivatives as on Apr 09 2020,,,,,,,,,,,,,,", "2020-04-09"),
+                        ('"Participant wise Open Interest (no. of contracts) in Equity Derivatives as on May 05,2020",,,,,,,,,,,,,,', "2020-05-05"),
+                        ('""Participant wise Open Interest (no. of contracts) in Equity Derivatives as on May 15,2020"",,,,,,,,,,,,,,', "2020-05-15")):
+        rows = n.parse_participant_oi("\n".join([title, *body]).encode())
+        assert rows[0]["trade_date"] == want
+
+
+def test_ban_list_nil_on_the_title_line_is_an_empty_list():
+    d, syms = n.parse_fo_ban(b"Securities in Ban For Trade Date 17-NOV-2026: NIL\n")
+    assert d == "2026-11-17" and syms == []
+    with pytest.raises(DrishtiError):
+        n.parse_fo_ban(b"Securities in Ban For Trade Date 17-NOV-2026: NIL\n1,ABC\n")
+
+
+# --- participant OI: the title in NSE's own files is sometimes misspelt, and two 2018 files hold averaged counts --------
+def test_participant_oi_title_misspelt_month_and_averaged_counts():
+    text = raw("fao_participant_oi_06112026.csv").decode("utf-8-sig")
+    body = text.splitlines()[1:]
+    t = "Participant wise Open Interest (no. of contracts) in Equity Derivatives as on Decemebr 06, 2018,,,,,,,,,,,,,,"
+    assert n.parse_participant_oi("\n".join([t, *body]).encode())[0]["trade_date"] == "2018-12-06"
+    t = "Participant wise Open Interest (no. of contracts) in Equity Derivatives for 13-Jun-2018,,,,,,,,,,,,,,"
+    assert n.parse_participant_oi("\n".join([t, *body]).encode())[0]["trade_date"] == "2018-06-13"
+    assert n._whole("216533.6667", "x") == 216534 and n._whole("5", "x") == 5 and kind(n._whole, "abc", "x") == ErrorKind.PARSE_FAIL
+
+
+def _oi_lines():
+    return raw("fao_participant_oi_06112026.csv").decode("utf-8-sig").splitlines()
+
+
+def test_participant_oi_title_without_a_year_uses_the_day_asked_for():
+    lines = _oi_lines()
+    t = "Participant wise Open Interest (no. of contracts) in Equity Derivatives as on Nov 06,,,,,,,,,,,,,,"       # seen 8 Jun 2021
+    assert n.parse_participant_oi("\n".join([t, *lines[1:]]).encode(), day=date(2026, 11, 6))[0]["trade_date"] == "2026-11-06"
+    assert kind(n.parse_participant_oi, "\n".join([t, *lines[1:]]).encode()) == ErrorKind.PARSE_FAIL        # no day given: cannot guess the year
+
+
+def test_participant_oi_file_with_no_title_line_takes_the_day_asked_for():
+    lines = _oi_lines()
+    body = "\n".join(lines[1:]).encode()                                                                  # seen 13 Jun 2018
+    assert n.parse_participant_oi(body, day=date(2018, 6, 13))[0]["trade_date"] == "2018-06-13"
+    assert kind(n.parse_participant_oi, body) == ErrorKind.PARSE_FAIL
+
+
+def test_participant_oi_wrong_total_column_is_repaired_only_when_the_components_prove_it():
+    lines = _oi_lines()
+    i = next(k for k, l in enumerate(lines) if l.startswith("Client,"))
+    parts = lines[i].split(",")
+    true_short = parts[-1]
+    parts[-1] = str(int(true_short) + 2_000_000)                       # seen 2017: a Total column that is nowhere near its components
+    lines[i] = ",".join(parts)
+    j = next(k for k, l in enumerate(lines) if l.startswith("TOTAL,"))
+    tp = lines[j].split(",")
+    tp[-1] = str(int(tp[-1]) + 2_000_000)                              # ... in the TOTAL row too
+    lines[j] = ",".join(tp)
+    rows = n.parse_participant_oi("\n".join(lines).encode())
+    client = next(r for r in rows if r["client_type"] == "Client")
+    assert client["total_short"] == int(true_short) or abs(client["total_short"] - int(true_short)) <= 2   # rebuilt from its own columns
+    parts = lines[i].split(",")
+    parts[1] = str(int(parts[1]) + 50_000)                             # a wrong COMPONENT is not repairable: participants no longer add to TOTAL
+    lines[i] = ",".join(parts)
+    assert kind(n.parse_participant_oi, "\n".join(lines).encode()) == ErrorKind.PARSE_FAIL
+
+
+# --- the older delivery file (MTO) ---------------------------------------------------------------------------------
+def _mto(rows=900, *, declared=None, extra=()):
+    body = ["Security Wise Delivery Position - Compulsory Rolling Settlement", f"10,MTO,15092016,386902432,{(declared or rows):07d}",
+            "Trade Date <15-SEP-2016>,Settlement Type <N>,Settlement No <2016174>,Settlement Date <19-SEP-2016>",
+            "Record Type,Sr No,Name of Security,Quantity Traded,Deliverable Quantity(gross across client level),% of Deliverable Quantity to Traded Quantity"]
+    body += [f"20,{i},SYM{i},EQ,1000,{400 + i % 500},{(400 + i % 500) / 10:.2f}" for i in range(1, rows + 1)]
+    return "\n".join([*body, *extra]).encode()
+
+
+def test_mto_parses_into_the_delivery_shape():
+    rows = n.parse_delivery_mto(_mto())
+    assert len(rows) == 900 and rows[0] == {"trade_date": "2016-09-15", "symbol": "SYM1", "series": "EQ", "ttl_qty": 1000, "deliv_qty": 401,
+                                            "deliv_per": 40.1, "trades": None}
+
+
+def test_mto_refuses_truncated_wrong_or_untrustworthy_files():
+    assert kind(n.parse_delivery_mto, _mto(declared=950)) == ErrorKind.PARSE_FAIL                       # says 950 records, holds 900
+    assert kind(n.parse_delivery_mto, b"<html>Access denied</html>") == ErrorKind.PARSE_FAIL
+    assert kind(n.parse_delivery_mto, _mto(rows=100)) in (ErrorKind.PARSE_FAIL, ErrorKind.EMPTY)       # far fewer stocks than a real session
+    bad = [f"20,{i},BAD{i},EQ,1000,2000,200.00" for i in range(950, 950 + n.MAX_BAD_DELIVERY_ROWS + 1)]
+    assert kind(n.parse_delivery_mto, _mto(declared=900 + len(bad), extra=bad)) == ErrorKind.PARSE_FAIL
+    one = n.parse_delivery_mto(_mto(declared=901, extra=["20,901,BAD,EQ,1000,2000,200.00"]))              # one impossible row is dropped
+    assert len(one) == 900
+
+
+def test_delivery_falls_back_to_the_old_file_only_when_the_new_one_is_missing_or_wrong(monkeypatch):
+    from drishti.core.fetch import Fetched
+    d = date(2016, 9, 15)
+
+    def fake_get(url, profile, expect="text", **k):
+        if "MTO_" in url:
+            return Fetched(url, _mto(), 200)
+        raise DrishtiError(ErrorKind.NOT_FOUND, "404")
+    monkeypatch.setattr(n, "get", fake_get)
+    r = n.delivery(d)
+    assert r.ok and len(r.data) == 900 and r.data[0]["trade_date"] == "2016-09-15"
+    monkeypatch.setattr(n, "get", lambda url, profile, expect="text", **k: (_ for _ in ()).throw(DrishtiError(ErrorKind.NOT_FOUND, "404")))
+    assert n.delivery(d).error.kind == ErrorKind.NOT_FOUND                                              # both missing: a holiday, reported as before
+    monkeypatch.setattr(n, "get", lambda url, profile, expect="text", **k: (_ for _ in ()).throw(DrishtiError(ErrorKind.BLOCKED_HTML, "x")))
+    assert n.delivery(d).error.kind == ErrorKind.BLOCKED_HTML                                            # a block is never worked around
+
+
+def test_mto_without_a_trade_date_line_takes_the_date_from_the_header_record():
+    lines = _mto().decode().splitlines()
+    body = "\n".join(l for l in lines if not l.startswith("Trade Date")).encode()          # seen: six 2017-2019 files
+    assert n.parse_delivery_mto(body)[0]["trade_date"] == "2016-09-15"
+    assert kind(n.parse_delivery_mto, "\n".join(l for l in lines if not l.startswith(("Trade Date", "10,"))).encode()) == ErrorKind.PARSE_FAIL
+
+
+def test_mto_record_count_off_by_one_is_tolerated_but_a_cut_file_is_not():
+    assert len(n.parse_delivery_mto(_mto(declared=899))) == 900                                  # seen 12 Oct 2018: declared 1739, held 1740
+    assert kind(n.parse_delivery_mto, _mto(declared=901)) == ErrorKind.PARSE_FAIL
+
+
+def test_delivery_uses_the_old_file_when_the_new_one_cannot_be_read(monkeypatch):
+    from drishti.core.fetch import Fetched
+    d = date(2022, 8, 8)
+    monkeypatch.setattr(n, "get", lambda url, profile, expect="text", **k: Fetched(url, _mto() if "MTO_" in url else b"garbage\n", 200))
+    monkeypatch.setattr(n, "parse_delivery_mto", lambda b, **k: [{"trade_date": "2022-08-08", "symbol": "A", "series": "EQ", "ttl_qty": 1, "deliv_qty": 1,
+                                                              "deliv_per": 100.0, "trades": None}])
+    r = n.delivery(d)
+    assert r.ok and r.data[0]["symbol"] == "A"
+
+
+_OI_2017 = {   # the real rows of three 2017 files whose Total columns are wrong (probe 18 Nov 2026)
+    "2017-09-22": ["Client,156638,182987,1038556,304222,608187,662233,645511,897799,324024,108730,236420,115879,2898368,5165307",
+                   "DII,17488,27895,24520,713982,124754,54906,0,0,158,0,0,0,221826,963703",
+                   "FII,157881,127448,365783,477810,268057,444621,219144,191751,28488,26400,30573,22624,1291230,2337956",
+                   "Pro,39022,32699,165435,98280,169064,224989,305407,297198,53261,57013,138938,53640,708784,1581306",
+                   "TOTAL,371029,371029,1594294,1594294,1170062,1386749,1170062,1386748,405931,192143,405931,192143,5120208,10048272"],
+    "2017-05-29": ["Client,114578,242614,889480,240439,313804,522443,543974,658571,135173,59467,105246,67718,1721141,1858562",
+                   "DII,16752,21492,28715,495886,142834,14453,0,0,415,0,20,0,60335,517398",
+                   "FII,219833,38437,406245,653821,235204,273032,166387,62136,15479,12219,15267,10054,926808,946102",
+                   "Pro,19570,68190,126017,60311,184717,160133,166198,249355,27960,33058,58494,26972,366738,629520",
+                   "TOTAL,370733,370733,1450457,1450457,876559,970061,876559,970062,179027,104744,179027,104744,3075022,3951582"],
+    "2017-01-24": ["Client,136476,207659,727318,238930,495404,767946,636577,837423,212351,144091,170011,110946,2483586,1364123",
+                   "DII,20963,41806,11709,452561,143817,11239,0,0,104,0,14,0,187832,494381",
+                   "FII,217489,102668,533014,612886,287371,429578,235085,175749,29669,22951,31370,26853,1520072,1008862",
+                   "Pro,24157,46952,121437,89101,195099,191186,250029,386778,52617,36090,93346,65333,620586,544761",
+                   "TOTAL,399085,399085,1393478,1393478,1121691,1399949,1121691,1399950,294741,203132,294741,203132,4812076,3412127"],
+}
+
+
+@pytest.mark.parametrize("day", sorted(_OI_2017))
+def test_participant_oi_real_2017_files_with_wrong_totals_are_read_from_their_components(day):
+    head = "Client Type," + ",".join(n._OI_COLS.keys())
+    title = f"Participant wise Open Interest (no. of contracts) in Equity Derivatives as on {date.fromisoformat(day):%b %d, %Y},,,,,,,,,,,,,,"
+    rows = n.parse_participant_oi("\n".join([f'"{title}"', head, *_OI_2017[day]]).encode())
+    assert rows[0]["trade_date"] == day
+    for r in rows:
+        assert r["total_long"] == sum(r[k] for k in n._LONGS) and r["total_short"] == sum(r[k] for k in n._SHORTS)
+    tot = next(r for r in rows if r["client_type"] == "TOTAL")
+    assert abs(tot["total_long"] - tot["total_short"]) <= 3                      # a market's longs and shorts match: the repair makes that true

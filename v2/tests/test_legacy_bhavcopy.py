@@ -214,3 +214,17 @@ def test_bse_many_broken_lines_is_a_layout_change():
     with pytest.raises(DrishtiError) as e:
         b.parse_bhavcopy_legacy(zipped(BSE_HEAD + BSE_ROWS + bad), min_rows=1)
     assert e.value.kind == ErrorKind.PARSE_FAIL and "wrong number of fields" in e.value.detail
+
+
+def test_previous_day_file_on_a_holiday_counts_as_a_holiday_not_a_failure():
+    from drishti.core.envelope import DrishtiError as E
+    ok = bf._served_previous_day(E(ErrorKind.STALE, "delivery: file for 2026-10-02 contains data for 2026-10-01"), date(2026, 10, 2))
+    later = bf._served_previous_day(E(ErrorKind.STALE, "x: file for 2023-04-11 contains data for 2023-11-04"), date(2023, 4, 11))
+    old = bf._served_previous_day(E(ErrorKind.STALE, "x: file for 2026-10-20 contains data for 2026-09-01"), date(2026, 10, 20))
+    assert ok and not later and not old
+
+
+def test_index_file_with_day_and_month_swapped_is_read_as_the_requested_day():
+    from drishti.providers import nse_archive as na
+    assert na._swapped("2023-11-04", date(2023, 4, 11)) and not na._swapped("2023-04-04", date(2023, 4, 4))
+    assert not na._swapped("2023-11-05", date(2023, 4, 11))

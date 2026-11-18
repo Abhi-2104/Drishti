@@ -18,8 +18,8 @@ from ..core.envelope import DrishtiError, ErrorKind, Result
 from . import log
 
 MARKET_SIGNALS = ("macro_regime", "participant_oi", "cycle_phase", "midcap_ratio", "fii_dii", "index_valuation", "sector_rotation", "seasonality")
-STOCK_SIGNALS = ("price_context", "insider_cluster", "pledge")
-_PRIVATE = {"isin", "symbol", "company", "name", "person", "trades", "nse_symbol"}
+STOCK_SIGNALS = ("price_context", "insider_cluster", "pledge", "deal_flow", "delivery_trend")
+_PRIVATE = {"isin", "symbol", "company", "name", "person", "trades", "nse_symbol", "client"}
 
 HOW_TO_ANSWER = {
     "entry": "ENTER = buy now; WAIT = no call; AVOID = expect the stock to lag the Nifty 50.",
@@ -100,14 +100,14 @@ def gather(store, gate: str, as_of: str, *, isin: str | None = None, blind: bool
 # A model trained on market history can recognise a date (or a Nifty / VIX / rupee level that pins one) and recall what
 # happened next. Masking keeps only what is relative to the case date: the stock's own prices rescaled to close = 100, returns,
 # distances, market signal labels and scores. Market inputs (absolute levels) and the seasonality signal (it names the month)
-# are dropped; every date becomes an offset in calendar days ("D-35"); month names and years in text are blanked.
+# and history-length notes are dropped, unknown reasons are made generic; every date becomes an offset in calendar days ("D-35"); month names and years in text are blanked.
 _ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})(?:[T ][0-9:.+]+)?\b")
 _DMY = re.compile(r"\b\d{1,2}[-/ ](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[-/ ]\d{2,4}\b", re.I)
 _MONTH = re.compile(r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december|"
                     r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b\.?", re.I)
 _YEAR = re.compile(r"\b(?:19[89]\d|20[0-4]\d)\b")
 _FY = re.compile(r"\b(?:FY|Q[1-4]\s?FY)\s?'?\d{2,4}\b", re.I)
-MASK_DROP_MARKET = ("seasonality",)
+MASK_DROP_MARKET = ("seasonality", "sector_rotation")   # the month; which sectors led (recognisable, and useless with the stock's sector hidden)
 _PRICE_KEYS = {"close", "atr14", "high_52w", "low_52w"}
 
 
@@ -176,13 +176,16 @@ def mask(bundle: dict) -> dict:
     sigs = stock.get("signals") or {}
     if "price_context" in sigs:
         sigs["price_context"] = _rescale_price(sigs["price_context"])
+    for sig in sigs.values():
+        sig["params_version"] = "masked"      # a settings version can embed the date the settings were made (seen: "D+3415.3+..."): an era clue
     market = {}
     for n, sig in (ev.get("market") or {}).items():
         if n in MASK_DROP_MARKET:
             continue
-        market[n] = {k: sig.get(k) for k in ("label", "score", "missing", "provisional")}
+        market[n] = {k: sig.get(k) for k in ("label", "score", "provisional")}   # "missing" notes say how much history exists: an era clue
     ev["market"] = market
-    ev["unknown"] = [u for u in ev.get("unknown") or [] if u.get("signal") not in MASK_DROP_MARKET]
+    ev["unknown"] = [{"signal": u.get("signal"), "why": "not available for this case"} for u in ev.get("unknown") or []
+                     if u.get("signal") not in MASK_DROP_MARKET]
     ev.pop("investor", None)
     ev = _mask_any(ev, on)
     ev["as_of"] = "D0"

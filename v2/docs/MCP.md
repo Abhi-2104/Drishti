@@ -82,3 +82,15 @@ profile layer, which only decisions and tools may read.
 ## Decision tools (see docs/DECISIONS.md)
 `gather_evidence` (evidence bundle for a gate and date, with hash), `record_decision` (append one call to the log),
 `get_decisions` (the log), `score_decisions` (how calls turned out vs the Nifty / cash, per author, with an optional paired comparison).
+
+## Evidence layer (E1, 17 Nov 2026)
+
+| Tool | Does |
+|---|---|
+| `add_evidence_source` | Store a document (transcript, annual report, announcement, results, prospectus, rating report) with the date it became public. Same text twice = one source. |
+| `validate_claim` | Is this quote word for word in the document? (Spaces, curly quotes and dashes are normalised; nothing else.) |
+| `record_evidence` | Store one claim + its quote + topic + polarity + author. Refused (`REJECTED`) unless the quote is verbatim in the source. |
+| `query_evidence` | Claims with quotes and documents, newest first; `as_of` keeps it point-in-time (only documents public by then). |
+
+Extraction is done by whoever calls `record_evidence` (Claude in the session, or a person); the store guarantees only that every
+quote exists in its document. PDF ingestion (E2) and `/drishti-concall`, `/ipo` (E3) build on these.

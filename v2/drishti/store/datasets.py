@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import Iterable
 
 INDEX_OPTION_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50")
@@ -718,8 +718,14 @@ def _price_successions(store, lo: str) -> list[dict]:
     [first, last]; consecutive non-overlapping spans of one symbol are a succession. Overlapping spans (two instruments trading
     together under one symbol) never are."""
     spans: dict[tuple, list[dict]] = {}
+    try:
+        since = (date.fromisoformat(lo) - timedelta(days=SUCC_MAX_GAP_DAYS + 30)).isoformat()
+    except (ValueError, OverflowError):
+        since = "0000"                      # the full rebuild passes a floor like "0000" or "0001-01-01"
+    # rows from just before `lo` suffice: a change counts only if the old ISIN's last session is on or after `lo` (the daily
+    # rebuild passes the last 30 days, so it no longer scans ten years of prices)
     for r in store.query("SELECT exchange, symbol, isin, MIN(trade_date) first, MAX(trade_date) last FROM price_eod "
-                         "WHERE symbol IS NOT NULL GROUP BY exchange, symbol, isin"):
+                         "WHERE symbol IS NOT NULL AND trade_date >= ? GROUP BY exchange, symbol, isin", (since,)):
         spans.setdefault((r["exchange"], r["symbol"]), []).append(r)
     out = []
     for (exchange, symbol), g in spans.items():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import sys
 from datetime import date
@@ -103,6 +104,31 @@ def test_server_lists_and_calls_tools(st):
     assert {"data_health", "insider_trades", "resolve_security", "get_macro_regime", "get_participant_oi", "get_sector_rotation",
             "get_options_flow", "get_insider_cluster", "get_pledge", "screen_disclosures", "get_seasonality"} <= set(names)
     assert "INE002A01018" in json.dumps(out.model_dump(mode="json"), default=str)
+
+
+def test_evidence_tools_round_trip_through_the_server(st):
+    pytest.importorskip("mcp")
+    srv = m.build_server(lambda: _Keep(st))
+    text = ("CFO: We are revising our full-year revenue growth guidance to 8-10% from the earlier 12-15% because exports slowed. " * 3)
+
+    async def go():
+        a = await srv.call_tool("add_evidence_source", {"kind": "concall", "title": "Q2 call", "published_at": "2026-10-30", "text": text,
+                                                        "query": "RELIANCE"})
+        sid = json.loads(json.dumps(a.model_dump(mode="json"), default=str)).__repr__()
+        return a, sid
+    a, dump = asyncio.run(go())
+    sid = re.search(r"src-[0-9a-f]{16}", dump).group(0)
+
+    async def go2():
+        bad = await srv.call_tool("record_evidence", {"source_id": sid, "claim": "Guidance was slashed to zero", "quote": "guidance slashed to zero growth",
+                                                     "topic": "guidance", "polarity": -1, "author": "claude/test"})
+        good = await srv.call_tool("record_evidence", {"source_id": sid, "claim": "FY revenue growth guidance cut to 8-10%",
+                                                      "quote": "revising our full-year revenue growth guidance to 8-10%", "topic": "guidance",
+                                                      "polarity": -1, "author": "claude/test"})
+        q = await srv.call_tool("query_evidence", {"query": "RELIANCE", "as_of": "2026-11-01"})
+        return [json.dumps(x.model_dump(mode="json"), default=str) for x in (bad, good, q)]
+    bad, good, q = asyncio.run(go2())
+    assert "REJECTED" in bad and "clm-" in good and "8-10%" in q
 
 
 class _Keep:

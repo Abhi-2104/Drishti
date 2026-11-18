@@ -72,7 +72,7 @@ def decode(body: bytes) -> str:
 
 def csv_rows(text: str, required: Iterable[str], label: str) -> list[dict[str, str]]:
     """DictReader with stripped header names; missing required columns is PARSE_FAIL (layout changed)."""
-    reader = csv.reader(io.StringIO(text))
+    reader = csv.reader(io.StringIO(re.sub(r"\r(?!\n)", "\n", text)))     # a lone CR (seen in a 2022 delivery file) is a line break, not part of a field
     try:
         header = [h.strip() for h in next(reader)]
     except StopIteration:

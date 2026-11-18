@@ -21,6 +21,7 @@ class ErrorKind(StrEnum):
     PARSE_FAIL = "PARSE_FAIL"      # fetched fine, layout not what we expect
     NETWORK = "NETWORK"            # connection errors and any other non-2xx
     NOT_IMPLEMENTED = "NOT_IMPLEMENTED"  # P1 stubs
+    REJECTED = "REJECTED"          # input refused by a check (e.g. a quote that is not in its document)
 
 
 class DrishtiError(Exception):

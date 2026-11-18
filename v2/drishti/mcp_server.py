@@ -8,6 +8,7 @@ Profile-neutral: nothing here knows about either brother's portfolio.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Callable
 
 from . import resolve as resolver
@@ -454,6 +455,52 @@ def build_server(open_store: Callable[[], Store], load_profile: Callable[[], obj
         from .decisions import watch
         with open_store() as st:
             return _env(watch.scan(st, _profile(), _date(as_of) or date.today(), since=since, mark=mark))
+
+    # --- evidence layer (E1): documents, and claims tied to verbatim quotes -------------------------------------------------
+    @srv.tool()
+    def add_evidence_source(kind: str, title: str, published_at: str, text: str | None = None, path: str | None = None,
+                            query: str | None = None, url: str | None = None) -> dict:
+        """Store a document as evidence: an earnings-call transcript, annual report, announcement, results, prospectus or rating
+        report. Give its full `text` (or a local `path` to a .txt file), the company (`query`: ISIN or symbol) and `published_at`, the
+        date it became public: queries as of an earlier day never see it. Returns a source_id for record_evidence."""
+        from . import evidence as ev
+        with open_store() as st:
+            try:
+                body = text if text is not None else (Path(path).read_text(encoding="utf-8", errors="replace") if path else None)
+                if not body:
+                    raise DrishtiError(ErrorKind.REJECTED, "give the document's text or a path to a text file")
+                isin = _stock_isin(st, query) if query else None
+                return _env(ev.add_source(st, text=body, kind=kind, title=title, published_at=published_at, isin=isin, url=url))
+            except (DrishtiError, OSError) as e:
+                return _env(Result(error=e if isinstance(e, DrishtiError) else DrishtiError(ErrorKind.NOT_FOUND, str(e))))
+
+    @srv.tool()
+    def validate_claim(source_id: str, quote: str) -> dict:
+        """Check that `quote` occurs word for word in the source (after normalising spaces, quotes and dashes). Use before citing."""
+        from . import evidence as ev
+        with open_store() as st:
+            return _env(ev.validate_claim(st, source_id, quote))
+
+    @srv.tool()
+    def record_evidence(source_id: str, claim: str, quote: str, topic: str, polarity: int, author: str) -> dict:
+        """Record one claim read from a source, with the exact quote that supports it. Refused unless the quote is verbatim in the
+        source. topic: guidance, demand, margins, capex, debt, orders, pricing, competition, governance, management, risk, accounting,
+        regulation or other. polarity: +1 good for the stock, -1 bad, 0 neutral. author: who read it (claude/<model> or a name)."""
+        from . import evidence as ev
+        with open_store() as st:
+            return _env(ev.record_evidence(st, source_id=source_id, claim=claim, quote=quote, topic=topic, polarity=polarity, author=author))
+
+    @srv.tool()
+    def query_evidence(query: str | None = None, as_of: str | None = None, topic: str | None = None, source_id: str | None = None,
+                       limit: int = 50) -> dict:
+        """Recorded claims with their quotes and documents, newest first. as_of keeps it point-in-time (only documents public by then)."""
+        from . import evidence as ev
+        with open_store() as st:
+            try:
+                isin = _stock_isin(st, query) if query else None
+                return _env(ev.query_evidence(st, isin=isin, on=as_of, topic=topic, source_id=source_id, limit=limit))
+            except DrishtiError as e:
+                return _env(Result(error=e))
 
     # --- slash commands: MCP prompts show up as /mcp__drishti__<name> in Claude Code, and in any client that lists prompts ---
     _RULES = ("Rules: use only what the evidence bundle holds; anything under 'unknown' is unknown, not neutral; do not use memory of events after "

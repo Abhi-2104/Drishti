@@ -52,7 +52,9 @@ def outcome(store, d: dict, today: str | None = None) -> dict:
             "subject": d["subject"], "symbol": d.get("symbol"), "action": d["action"], "stance": d["stance"], "confidence": d["confidence"],
             "horizon_days": d["horizon_days"]}
     hz = d["horizon_days"]
-    nifty = h.index_series(store, NIFTY, today or date.today(), days=2000)
+    on = date.fromisoformat(today) if isinstance(today, str) else (today or date.today())
+    back = max(400, (on - date.fromisoformat(d["as_of"])).days + 30)     # reach back to the decision date, however old (was a fixed 2000 days)
+    nifty = h.index_series(store, NIFTY, on, days=back)
     after = [x for x in nifty if x[0] > d["as_of"]]
     start = _at_or_before(nifty, d["as_of"])
     if start is None or (date.fromisoformat(d["as_of"]) - date.fromisoformat(start[0])).days > 5:

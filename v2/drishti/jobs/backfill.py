@@ -6,6 +6,7 @@ a host. NOT_FOUND on a weekday is an exchange holiday and is counted, not failed
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -72,6 +73,21 @@ def _eta(elapsed: float, done: int, total: int) -> str:
     return f"{left / 60:.0f} min left" if left >= 90 else f"{left:.0f}s left"
 
 
+_STALE_RE = re.compile(r"file for (\d{4}-\d{2}-\d{2}) contains data for (\d{4}-\d{2}-\d{2})")
+
+
+def _served_previous_day(err, d: date) -> bool:
+    """STALE because the file holds an EARLIER session than asked for: on a holiday NSE serves the last session's file.
+    (A LATER date, or one more than a week earlier, stays a failure.)"""
+    if err.kind != ErrorKind.STALE:
+        return False
+    m = _STALE_RE.search(err.detail or "")
+    if not m or m.group(1) != d.isoformat():
+        return False
+    got = date.fromisoformat(m.group(2))
+    return got < d and (d - got).days <= 7
+
+
 def _daily(store: Store, target: str, table: str, fetch: Callable[[date], Result], persist: Callable[[Store, Result], int], *,
            days: int, budget_s: float, start: date, clock=time.monotonic, progress=_noop) -> BackfillReport:
     rep = BackfillReport(target)
@@ -98,8 +114,8 @@ def _daily(store: Store, target: str, table: str, fetch: Callable[[date], Result
             streak = 0
             rep.oldest = d.isoformat()
             rep.newest = rep.newest or d.isoformat()
-        elif res.error.kind == ErrorKind.NOT_FOUND:
-            rep.holidays += 1
+        elif res.error.kind == ErrorKind.NOT_FOUND or _served_previous_day(res.error, d):
+            rep.holidays += 1          # no file, or (on a holiday) the exchange served the previous session's file: nothing traded
         else:
             rep.failed.append({"date": d.isoformat(), "kind": str(res.error.kind), "detail": res.error.detail[:160]})
             streak += 1

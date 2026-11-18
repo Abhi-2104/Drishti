@@ -545,7 +545,10 @@ def test_masked_bundle_leaks_no_date_level_or_identity(st):
     assert pc["inputs"][1] == blind["evidence"]["stock"]["signals"]["price_context"]["inputs"][1] or "return" in pc["inputs"][1]["input"]
     assert "seasonality" not in m["evidence"]["market"]
     for sig in m["evidence"]["market"].values():
-        assert set(sig) == {"label", "score", "missing", "provisional"}    # labels and scores only: no absolute levels
+        assert set(sig) == {"label", "score", "provisional"}               # labels and scores only: no levels, no history-length notes
+    assert "sector_rotation" not in m["evidence"]["market"]
+    assert all(u["why"] == "not available for this case" for u in m["evidence"]["unknown"])
+    assert all(sig["params_version"] == "masked" for sig in m["evidence"]["stock"]["signals"].values())   # a settings version can carry a date
     assert m["bundle_sha"] != blind["bundle_sha"]
     assert gather.mask(blind) == m                                         # deterministic
 
@@ -566,3 +569,31 @@ def test_masked_export_skips_market_gates_and_writes_offsets(st, tmp_path):
     assert r["written"] == 1 and r["failed_count"] == 1 and r["masked"] is True
     doc = (tmp_path / "b" / "case-00001.json").read_text()
     assert AS_OF not in doc and '"as_of": "D0"' in doc
+
+
+def test_outcome_reaches_back_to_old_decisions(st):
+    # scoring a call made years before "today" must still find the Nifty (it used to look back a fixed 2000 days)
+    d = call(st).data
+    o = score.outcome(st, {**d, "scope": "stock"}, today="2034-01-01")
+    assert o["status"] == "scored"
+
+
+def test_history_breakdown_splits_rules_cases_and_keeps_hindsight_separate(st):
+    from drishti.decisions import breakdown, history
+    import tempfile, pathlib
+    history.run(st, out=pathlib.Path(tempfile.mkdtemp()) / "cases.json", every=40, n_stocks=2, min_sessions_before=100)
+    r = breakdown.run(st)
+    assert r["cases"] > 0 and set(r["by_action"]) <= {"ENTER", "WAIT", "AVOID"}
+    total = sum(v["all"]["n"] for v in r["by_action"].values())
+    assert total == r["cases"] == r["overall"]["n"]
+    assert all(k.endswith("(hindsight)") for k in r["by_breadth_hindsight"])
+    # rules_minus_always_long is exactly rules_per_case - stocks_vs_nifty on every slice
+    o = r["overall"]
+    assert abs(o["rules_minus_always_long"] - (o["rules_per_case"] - o["stocks_vs_nifty"])) < 0.02
+
+
+def test_breakdown_reads_rules_reasons():
+    from drishti.decisions import breakdown as b
+    t = "+2 close above the 50-day and 200-day averages, 50 above 200; -1 -3.4% against the Nifty over ~3 months; +1 macro tide +2"
+    assert (b._trend(t), b._strength(t), b._macro(t)) == ("uptrend", "lagging Nifty", "macro supportive")
+    assert b._tercile({"a": 1.0, "b": 2.0, "c": 3.0}) == {"a": "weak", "b": "middle", "c": "strong"}

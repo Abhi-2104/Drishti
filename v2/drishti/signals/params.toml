@@ -100,6 +100,19 @@ provisional = true
 strong_caution_pledged_pct = 25.0   # scoring.md: ">25% pledged = strong caution" (of promoter holding)
 rising_min_pp = 1.0                 # provisional: rise of this many points QoQ counts as "rising pledge" (scoring.md red flag)
 
+[deal_flow]                         # added 17 Nov 2026: bulk/block deals, net of matched transfers (provisional)
+window_days = 60
+net_pct_of_volume = 2.0             # provisional: net deal quantity of +/-2% of the window's traded volume is a clear side
+short_pct_of_volume = 1.0           # provisional
+provisional = true
+
+[delivery_trend]                    # added 17 Nov 2026: delivery % recent vs its own baseline (provisional)
+recent = 20                         # sessions
+baseline = 120                      # sessions before the recent ones
+min_baseline = 40
+change_pp = 5.0                     # provisional: a 5-point shift in average delivery % is a real change
+provisional = true
+
 [india_macro]                        # when MoSPI publishes, as days after the reference month's END (a reading is unknown before that)
 cpi_release_lag_days = 12            # CPI for month M comes out around the 12th of M+1 (provisional: confirm against the MoSPI release calendar)
 wpi_release_lag_days = 14            # WPI around the 14th of M+1

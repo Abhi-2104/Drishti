@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
-    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-coverage")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-breakdown | history-coverage")
     dc.add_argument("what")
     dc.add_argument("--gate", default=None)
     dc.add_argument("--start", default=None)
@@ -286,6 +286,10 @@ def _decisions(st, args, cfg) -> int:
         from .decisions import history as hs
         print(_json.dumps(hs.report(st, since=args.start, until=args.end), indent=1))
         return 0
+    if w == "history-breakdown":
+        from .decisions import breakdown as bd
+        print(_json.dumps(bd.run(st, since=args.start, until=args.end), indent=1))
+        return 0
     if w == "history-coverage":
         from .decisions import history as hs
         print(_json.dumps(hs.coverage(st), indent=1))
@@ -295,7 +299,7 @@ def _decisions(st, args, cfg) -> int:
         r = hs.run(st, out=Path(args.cases or "eval/history/cases.json"), start=args.start, end=args.end, every=args.every, n_stocks=args.n_stocks, seed=args.seed)
         print(_json.dumps(r, indent=1))
         return 0 if r["done"] else 1
-    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-coverage", file=sys.stderr)
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-breakdown history-coverage", file=sys.stderr)
     return 2
 
 

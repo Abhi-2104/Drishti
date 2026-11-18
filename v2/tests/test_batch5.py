@@ -292,3 +292,23 @@ def test_mcp_exposes_get_delivery():
         assert "get_delivery" in names
     finally:
         s.close()
+
+
+# --- delivery: a few unusable rows are dropped, many are refused ---------------------------------------------------
+def test_delivery_drops_one_impossible_row_but_keeps_the_rest():
+    good = [line(f"S{i}") for i in range(30)]
+    rows = nse_archive.parse_delivery(csv(*good, line("BAD", "ST", ttl=2561000, dq="2566000", dp="99.92")), min_rows=1)   # seen: WTICAB/ST, 19 Feb 2024
+    assert len(rows) == 30 and "BAD" not in {r["symbol"] for r in rows}
+
+
+def test_delivery_refuses_a_file_with_many_unusable_rows():
+    good = [line(f"S{i}") for i in range(30)]
+    bad = [line(f"B{i}", dq="2000", dp="200.00") for i in range(nse_archive.MAX_BAD_DELIVERY_ROWS + 1)]
+    assert kind(nse_archive.parse_delivery, csv(*good, *bad), min_rows=1) == ErrorKind.PARSE_FAIL
+
+
+def test_delivery_record_cut_by_a_lone_carriage_return():
+    good = [line(f"S{i}") for i in range(30)]
+    body = ("\n".join([HEAD, *good[:10], "SPLIT, EQ, 06-Nov-2026, 10, 10, 11\r9, 10, 10, 10, 1000, 1, 50, 400, 40.00", *good[10:]]) + "\n").encode()
+    rows = nse_archive.parse_delivery(body, min_rows=1)       # both halves of the cut record are dropped, nothing else is lost
+    assert len(rows) == 30
