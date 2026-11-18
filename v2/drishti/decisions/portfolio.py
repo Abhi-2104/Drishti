@@ -56,11 +56,23 @@ def _picks_rules_v1(rs: list[dict]) -> list[dict]:
     return sorted(ent, key=lambda r: (-r["rules_v1"]["points"], r["isin"]))
 
 
+def _picks_rules_v2(rs: list[dict]) -> list[dict]:
+    from . import rules_v2
+    out = []
+    for r in rs:
+        d = rules_v2.score(r.get("price"), r.get("deal_flow"))
+        if d is not None and d["action"] == "ENTER":
+            out.append((d["points"], r))
+    return [r for _, r in sorted(out, key=lambda x: (-x[0], x[1]["isin"]))]
+
+
 STRATEGIES = {
     "nifty": (None, "nifty"),
     "always-long (all sampled stocks)": (_picks_all, "cash"),
     "rules-v1 ENTER, else cash": (_picks_rules_v1, "cash"),
     "rules-v1 ENTER, else Nifty": (_picks_rules_v1, "nifty"),
+    "rules-v2 ENTER, else cash": (_picks_rules_v2, "cash"),
+    "rules-v2 ENTER, else Nifty": (_picks_rules_v2, "nifty"),
 }
 
 

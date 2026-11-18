@@ -1,0 +1,28 @@
+# rules-v2 (ENTRY gate only): FROZEN before the 2022-26 hold-out was opened. Change a number only by raising `version`, never to
+# improve a past result. Built from the 2017-21 signal study alone (readings that cleared its bootstrap: strength vs Nifty over 3
+# months, and within 5% of the 52-week high; net deal selling was thin, n=40, and is kept at one point only).
+# Dropped from v1: "chasing" and the macro-tide points (no evidence in 2017-21). Trend is cut from +/-2 to +/-1 (the study found no
+# information in it). Insider and pledge are as in v1 but cannot be tested on history (no historical data), so the hold-out
+# judges the price and deal readings only. The exit and macro gates stay on rules-v1.
+version = "2"
+
+[data]
+min_sessions = 60         # fewer stored sessions than this: no call at all (a skipped case, never a guessed WAIT)
+
+[stock_points]
+trend_up = 1              # close > 50-day > 200-day average
+trend_down = -1           # close < 50-day < 200-day average
+trend_weak_up = 1         # fewer than 200 sessions stored: above the 50-day average and up over 3 months
+trend_weak_down = -1
+rel_strength_pos = 1      # beating the Nifty over ~3 months
+rel_strength_neg = -1
+near_high = 1             # close within near_high_pct of the 52-week high
+near_high_pct = 5.0
+deal_selling = -1         # net deal selling (bulk/block deals, sellers outweigh buyers)
+insider_buy = 1           # live use only: insider buying cluster or size buying
+insider_sell = -1         # live use only: insider selling cluster
+
+[entry]
+enter_at = 3              # points to ENTER (chosen 19 Nov: about 1 case in 7 on the 2017-21 set)
+avoid_at = -2             # points (or a strong-caution pledge) to AVOID; otherwise WAIT
+horizon_days = 60

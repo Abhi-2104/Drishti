@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
-    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-breakdown | history-coverage | signal-study | portfolio-sim")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-breakdown | history-coverage | signal-study | portfolio-sim | holdout")
     dc.add_argument("what")
     dc.add_argument("--gate", default=None)
     dc.add_argument("--start", default=None)
@@ -342,12 +342,27 @@ def _decisions(st, args, cfg) -> int:
         (out / "portfolio.json").write_text(_json.dumps(r, indent=1), encoding="utf-8")
         print(_json.dumps(r, indent=1))
         return 0
+    if w == "holdout":
+        from .decisions import holdout
+        out = Path(args.out or "eval/study")
+        rows_path = out / "rows.jsonl"
+        if not rows_path.exists():
+            print(f"drishti decisions holdout: {rows_path} not found; run `drishti decisions signal-study` first", file=sys.stderr)
+            return 2
+        try:
+            r, target = holdout.execute(rows_path, out, start=args.start, end=args.end, max_positions=args.max_positions, every=args.every)
+        except FileExistsError as e:
+            print(f"drishti decisions holdout: {e}", file=sys.stderr)
+            return 2
+        print(_json.dumps(r, indent=1))
+        print(f"written to {target}", file=sys.stderr)
+        return 0
     if w == "history":
         from .decisions import history as hs
         r = hs.run(st, out=Path(args.cases or "eval/history/cases.json"), start=args.start, end=args.end, every=args.every, n_stocks=args.n_stocks, seed=args.seed)
         print(_json.dumps(r, indent=1))
         return 0 if r["done"] else 1
-    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-breakdown history-coverage signal-study portfolio-sim", file=sys.stderr)
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-breakdown history-coverage signal-study portfolio-sim holdout", file=sys.stderr)
     return 2
 
 
