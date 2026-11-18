@@ -1,49 +1,40 @@
-# Registers (or re-registers) every Drishti job in Windows Task Scheduler for the current user.
-#   powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1            # register / update all
-#   powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1 -Remove    # remove them all
-# Tasks run when you are logged on. -StartWhenAvailable runs a missed task when the machine wakes. Every job is safe
-# to repeat, so the repetitions below are "retry until the exchange has published".
+# Registers ONE Windows Task Scheduler task, "Drishti catchup", for the current user. It runs `drishti catchup`, which works out
+# by itself which of the three slots (Morning 08:30, Evening 20:30, Weekly Sat 10:00, IST) are due and not yet done, so a laptop
+# that was off simply catches up at the next trigger.
+#   powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1            # register / update
+#   powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1 -Remove    # remove it (and any old per-job tasks)
+# Triggers: at logon (2 min delay, for the network), daily 08:30, daily 20:30, Saturday 10:00. A missed start runs as soon as
+# possible (StartWhenAvailable); it only runs with a network; a second copy never starts while one runs (IgnoreNew; catchup also
+# holds a lock file); 2 hour limit. The task runs while you are logged on. Times are the laptop's clock, so keep it on IST.
 param([switch]$Remove)
 
-$uv   = (Get-Command uv -ErrorAction Stop).Source
+$taskName = "Drishti catchup"
 $proj = Split-Path -Parent $PSScriptRoot
 
-# job, kind (Daily | Weekly), days (Weekly only), time(s), repeat every N minutes (0 = no repeat), for N hours
-$jobs = @(
-    @("eod_bhavcopy",    "Daily",  "",          @("18:45"),          30, 4),
-    @("eod_flows",       "Daily",  "",          @("19:15"),          30, 4),
-    @("eod_corporate",   "Daily",  "",          @("19:45"),          60, 2),
-    @("signals_daily",   "Daily",  "",          @("21:45"),          0,  0),
-    @("premarket",       "Daily",  "",          @("08:45"),          30, 1),
-    @("macro_daily",     "Daily",  "",          @("07:15"),          0,  0),
-    @("macro_india",     "Daily",  "",          @("18:10"),          0,  0),
-    @("news",            "Daily",  "",          @("07:05"),          120, 14),
-    @("insider",         "Daily",  "",          @("07:30", "20:30"), 0,  0),
-    @("shp_master",      "Daily",  "",          @("07:45"),          0,  0),
-    @("us_daily",        "Daily",  "",          @("07:20"),          0,  0),
-    @("calendars",       "Weekly", "Monday",    @("07:00"),          0,  0),
-    @("macro_weekly",    "Weekly", "Saturday",  @("10:00"),          0,  0),
-    @("security_master", "Weekly", "Sunday",    @("10:00"),          0,  0)
-)
-
-foreach ($j in $jobs) {
-    $name = "Drishti $($j[0])"
-    if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $name -Confirm:$false
-    }
-    if ($Remove) { Write-Host "removed  $name"; continue }
-    $act = New-ScheduledTaskAction -Execute $uv -Argument "run drishti run $($j[0])" -WorkingDirectory $proj
-    $triggers = foreach ($t in $j[3]) {
-        if ($j[1] -eq "Weekly") { $trg = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $j[2] -At $t }
-        else { $trg = New-ScheduledTaskTrigger -Daily -At $t }
-        if ($j[4] -gt 0) {
-            $trg.Repetition = (New-ScheduledTaskTrigger -Once -At $t -RepetitionInterval (New-TimeSpan -Minutes $j[4]) `
-                                -RepetitionDuration (New-TimeSpan -Hours $j[5])).Repetition
-        }
-        $trg
-    }
-    $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 45) -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName $name -Action $act -Trigger $triggers -Settings $set -Description "drishti run $($j[0])" | Out-Null
-    Write-Host ("registered {0,-26} {1} {2} {3}" -f $name, $j[1], $j[2], ($j[3] -join ", "))
+# the per-job tasks of the older version of this script: remove them so nothing runs twice
+Get-ScheduledTask -TaskName "Drishti *" -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -ne $taskName } | ForEach-Object {
+    Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false
+    Write-Host "removed  $($_.TaskName) (replaced by $taskName)"
 }
-if (-not $Remove) { Write-Host "`nCheck later with: uv run drishti health" }
+if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    if ($Remove) { Write-Host "removed  $taskName"; exit 0 }
+} elseif ($Remove) { Write-Host "nothing to remove"; exit 0 }
+
+$uv = (Get-Command uv -ErrorAction Stop).Source
+$action = New-ScheduledTaskAction -Execute $uv -Argument "run drishti catchup" -WorkingDirectory $proj
+
+$logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+$logon.Delay = "PT2M"
+$morning = New-ScheduledTaskTrigger -Daily -At "08:30"
+$evening = New-ScheduledTaskTrigger -Daily -At "20:30"
+$weekly = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At "10:00"
+
+$set = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logon, $morning, $evening, $weekly) -Settings $set `
+    -Description "drishti catchup: runs every Drishti slot that is due and not yet done (morning, evening, weekly)" | Out-Null
+Write-Host "registered $taskName  (logon, 08:30, 20:30, Sat 10:00)"
+Write-Host "Try it now:  Start-ScheduledTask -TaskName '$taskName'   then   uv run drishti health"
+Write-Host "Or see what is due without running anything:  uv run drishti catchup --plan"

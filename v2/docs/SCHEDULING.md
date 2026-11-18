@@ -1,53 +1,70 @@
 # Scheduling Drishti jobs
 
-Data collection needs no model and no always-on process: the OS scheduler runs `drishti run <job>`. Every job is safe to
-repeat (files already stored are not fetched again), so "retry until the file is published" is just a repeating trigger.
+Data collection needs no model and no always-on process: the OS scheduler runs **`drishti catchup`**, which works out what is
+due. Every job is safe to repeat (files already stored are not fetched again), so a retry is just another run.
 
 `uv run drishti jobs` lists the jobs with a suggested time (IST). `uv run drishti health` shows what is fresh and what failed
 (exit code 1 when anything is degraded). `uv run drishti run <job>` exits 1 if any step failed.
 
+## How `drishti catchup` works
+
+Three slots, IST. For each slot, the latest scheduled time already past is "due"; it runs when the job log shows no successful
+completion of that slot since then. Slots run oldest first. So a laptop that was off catches up at the next trigger, and a
+trigger that finds nothing due does nothing. A failed slot is retried at the next trigger (not within 30 minutes), until the
+slot's next scheduled time replaces it.
+
+| Slot | When (IST) | Jobs |
+|---|---|---|
+| morning | daily 08:30 | `macro_daily`, `us_daily`, `premarket`, `insider`, `shp_master`, `news`; Mon also `calendars`, Sun also `security_master` |
+| evening | daily 20:30 | `eod_bhavcopy`, `eod_flows`, `eod_corporate`, `macro_india`, `insider`, `news`; then the **gap fill**; then `signals_daily` |
+| weekly | Sat 10:00 | `macro_weekly`, the forward log, holdings import, the **weekly pack**, import of Claude's answers |
+
+(`news` does nothing, and says so, while `settings.toml` lists no feeds.)
+
+**Gap fill.** For prices, delivery %, participant OI and index closes it finds sessions missing from the last 30 days (and
+everything since the newest stored day, up to 400 days) and fetches only those, through the same resumable code as
+`drishti backfill`. Deals are re-fetched when the newest deal is more than 4 days old. A missing day the exchange has no file for
+(a holiday) is remembered for 7 days so it is not asked for again on every run. An empty table is not a gap: the first fill is
+`drishti backfill`. Known loss: NSE serves FII/DII cash for the latest day only, so a day the laptop stays off is gone
+(NSDL FPI covers FPI history).
+
+**Weekly pack.** `<private>/weekly/<last session>/` holds an evidence bundle per holding (exit gate) and per new-stock candidate
+(entry gate), `pack.json`, and a README with the answer format. rules-v1 is run on the same cases first. The Saturday Claude
+review writes `claude-<date>.jsonl` and `review-<date>.md` next to it; the next catch-up imports the calls once. `<private>` is
+`--private-dir`, else `$DRISHTI_PRIVATE`, else `../private` next to `v2/`, else `./private`. It is git-ignored and never uploaded.
+
+One catch-up at a time (a lock file next to the database), a time budget of 100 minutes (a slot that does not fit stays due),
+exit code 1 if anything failed. Look before running: `uv run drishti catchup --plan`. Run one slot by hand:
+`uv run drishti catchup --slot evening`.
+
 ## Windows (Task Scheduler)
 
-One script registers every job, and running it again updates them (it removes and re-adds each task):
+One script registers one task, "Drishti catchup", and running it again updates it (it also removes the old per-job tasks):
 
 ```powershell
 cd $HOME\Documents\Drishti\v2
 powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1
 ```
 
-`-Remove` takes them all out again. Tasks run while you are logged on; `-StartWhenAvailable` runs a missed one when the
-machine wakes. Try one by hand with `Start-ScheduledTask -TaskName "Drishti eod_bhavcopy"`, then `uv run drishti health`.
-The job list in the script is checked by a test against `drishti jobs`, so a new job cannot be forgotten there.
+`-Remove` takes it out again. Triggers: at logon (2 minute delay), daily 08:30, daily 20:30, Saturday 10:00. A missed start runs
+as soon as possible, it needs a network, a second copy never starts while one runs, and it stops after 2 hours. It runs while
+you are logged on; keep the laptop's clock on IST. Try it with `Start-ScheduledTask -TaskName "Drishti catchup"`, then
+`uv run drishti health`. A test pins the slot table to `drishti jobs`, so a new job cannot be forgotten, and pins the script to
+`drishti catchup` and its four triggers.
 
 ## Linux / WSL (cron)
 
 ```
-45 18 * * 1-5  cd ~/Drishti/v2 && uv run drishti run eod_bhavcopy
+*/30 * * * *  cd ~/Drishti/v2 && uv run drishti catchup
 ```
-(Repeat the line for 19:15, 19:45, ... if you want retries.)
+(It does nothing unless a slot is due, so a frequent trigger is fine.)
 
 ## macOS (launchd)
 
-Create `~/Library/LaunchAgents/com.drishti.eod_bhavcopy.plist` running `uv run drishti run eod_bhavcopy` from the project
-directory with `StartCalendarInterval` Hour 18 / Minute 45, then `launchctl load` it.
+Create `~/Library/LaunchAgents/com.drishti.catchup.plist` running `uv run drishti catchup` from the project directory with
+`RunAtLoad` and a `StartInterval` of 1800, then `launchctl load` it.
 
-## Schedule (what the script registers)
+## Running a single job by hand
 
-| Job | When (IST) | Why |
-|---|---|---|
-| `eod_bhavcopy` | daily 18:45, every 30 min for 4 h | NSE/BSE publish between about 18:00 and 19:00; then split/bonus adjustments |
-| `eod_flows` | daily 19:15, every 30 min for 4 h | participant OI, F&O ban list, index closes, bulk/block deals, FII/DII |
-| `eod_corporate` | daily 19:45, hourly for 2 h | announcements, corporate actions, board meetings, ratings, large deals, IPOs |
-| `signals_daily` | daily 21:45 | after the evening data is in |
-| `premarket` | daily 08:45, every 30 min for 1 h | Gift Nifty, NSDL confirmed FPI flows |
-| `macro_daily` | daily 07:15 | Yahoo and FRED daily series |
-| `macro_india` | daily 18:10 | MoSPI CPI (about the 12th), WPI (14th), IIP (28th), RBI reserves; a series past its window is reported STALE |
-| `news` | daily 07:05, every 2 h for 14 h | RSS / Atom feeds from settings.toml; does nothing (and says so) while the list is empty |
-| `insider` | daily 07:30 and 20:30 | filings arrive through the evening; only new ones are downloaded |
-| `shp_master` | daily 07:45 | filings arrive around quarter-end |
-| `calendars` | Mon 07:00 | holidays (incl. special sessions) and expiry dates |
-| `macro_weekly` | Sat 10:00 | CFTC publishes Friday; FRED updates weekly |
-| `security_master` | Sun 10:00 | listings and BSE scrip codes |
-
-Daily jobs also run at weekends: a weekend run finds nothing new and costs a few requests, and it catches special
-sessions such as Diwali Muhurat trading without a calendar of its own.
+`uv run drishti jobs` lists the jobs with a suggested time; `uv run drishti run <job>` runs one and exits 1 if any step failed;
+`uv run drishti health` shows what is fresh and what failed (exit code 1 when anything is degraded).

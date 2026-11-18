@@ -1,4 +1,4 @@
-"""drishti CLI: run <job> | jobs | health | resolve | init | paths  (worker is a stub)."""
+"""drishti CLI: catchup | run <job> | jobs | health | holdings | decisions | resolve | init | paths  (worker is a stub: use catchup)."""
 from __future__ import annotations
 
 import argparse
@@ -30,6 +30,15 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="run one job by hand")
     run.add_argument("job")
     sub.add_parser("jobs", help="list jobs and their suggested schedule")
+    cu = sub.add_parser("catchup", help="what Task Scheduler runs: every slot that is due and not yet done (morning, evening, weekly), then the gap fill")
+    cu.add_argument("--plan", action="store_true", help="show what is due and what would run; change nothing")
+    cu.add_argument("--slot", default=None, help="run one slot now whether or not it is due: morning | evening | weekly")
+    cu.add_argument("--budget-min", type=float, default=100.0, help="start no new job after this many minutes; unfinished slots stay due")
+    cu.add_argument("--private-dir", default=None, help="folder with holdings.csv and weekly packs (default: $DRISHTI_PRIVATE, ../private, ./private)")
+    cu.add_argument("--eval-dir", default="eval", help="folder for the forward log (default: eval)")
+    hd = sub.add_parser("holdings", help="holdings in the database: import <holdings.csv> | txns <transactions.csv> | summary")
+    hd.add_argument("what")
+    hd.add_argument("file", nargs="?", default=None)
     sub.add_parser("health", help="data freshness and the latest result of every job step")
     rv = sub.add_parser("resolve", help="look up a security by ISIN, NSE/BSE symbol or BSE scrip code")
     rv.add_argument("query")
@@ -47,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
-    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-breakdown | history-coverage | signal-study | portfolio-sim | holdout")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-breakdown | history-coverage | signal-study | portfolio-sim | holdout | candidates | pack")
     dc.add_argument("what")
     dc.add_argument("--gate", default=None)
     dc.add_argument("--start", default=None)
@@ -73,6 +82,9 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--a", default=None, help="compare/audit: first author, agent/model")
     dc.add_argument("--b", default=None, help="compare: second author; audit: the revised author (optional)")
     dc.add_argument("--max-positions", type=int, default=5, help="portfolio-sim: most stocks held per sleeve")
+    dc.add_argument("--top", type=int, default=15, help="candidates / pack: how many new-stock candidates")
+    dc.add_argument("--private-dir", default=None, help="pack: folder with weekly packs (default: $DRISHTI_PRIVATE, ../private, ./private)")
+    dc.add_argument("--force", action="store_true", help="pack: rebuild even if this week's pack exists")
     evp = sub.add_parser("evidence", help="evidence layer checks: audit (re-prove every stored quote) | sample (claims to check by eye) | summary (review score)")
     evp.add_argument("what")
     evp.add_argument("--n", type=int, default=20)
@@ -195,6 +207,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         with Store(cfg.db_path) as st:
             return _backfill(st, args) if args.cmd == "backfill" else _signal(st, args)
+    if args.cmd in ("catchup", "holdings"):
+        from .store import Store
+        try:
+            cfg = load_settings()
+        except ConfigError as e:
+            print(f"drishti {args.cmd}: {e}", file=sys.stderr)
+            return 2
+        with Store(cfg.db_path) as st:
+            return _catchup(st, args, cfg) if args.cmd == "catchup" else _holdings(st, args)
     if args.cmd == "jobs":
         from .jobs import JOBS
         for j in JOBS.values():
@@ -357,12 +378,98 @@ def _decisions(st, args, cfg) -> int:
         print(_json.dumps(r, indent=1))
         print(f"written to {target}", file=sys.stderr)
         return 0
+    if w == "candidates":
+        from .decisions import candidates as cd
+        r = cd.screen(st, args.as_of, top_n=args.top)
+        if not r.ok:
+            print(f"{r.error.kind}: {r.error.detail}", file=sys.stderr)
+            return 1
+        d = r.data
+        print(f"{d['status']} candidates as of {d['as_of']} ({d['params_version']}): {d['universe']} liquid, {d['equities']} equities, "
+              f"{d['passed_readings']} pass both readings, {d['after_red_flags']} after red flags; top {len(d['candidates'])}")
+        for c in d["candidates"]:
+            print(f"{c['rank']:>3}  {c['symbol'] or '-':<12s} {(c['name'] or '')[:34]:<34s} vs Nifty 3m {c['rs_3m']:+6.1f}%  {c['gap_to_52w_high_pct']:+5.1f}% from 52w high"
+                  + (f"   unknown: {', '.join(c['unknown'])}" if c["unknown"] else ""))
+        print("dropped: " + "; ".join(f"{k} {v}" for k, v in d["dropped"].items()))
+        print(d["note"])
+        return 0
+    if w == "pack":
+        from . import weekly
+        prof = None
+        try:
+            from .profile import load_profile
+            prof = load_profile(cfg)
+        except Exception:
+            prof = None
+        r = weekly.build_pack(st, weekly.private_dir(args.private_dir), as_of=args.as_of, force=args.force, profile=prof, top_n=args.top)
+        if not r.ok:
+            print(f"{r.error.kind}: {r.error.detail}", file=sys.stderr)
+            return 1
+        print(_json.dumps(r.data, indent=1, default=str))
+        return 0
     if w == "history":
         from .decisions import history as hs
         r = hs.run(st, out=Path(args.cases or "eval/history/cases.json"), start=args.start, end=args.end, every=args.every, n_stocks=args.n_stocks, seed=args.seed)
         print(_json.dumps(r, indent=1))
         return 0 if r["done"] else 1
-    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-breakdown history-coverage signal-study portfolio-sim holdout", file=sys.stderr)
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-breakdown history-coverage signal-study portfolio-sim holdout candidates pack", file=sys.stderr)
+    return 2
+
+
+def _catchup(st, args, cfg) -> int:
+    import logging
+    from pathlib import Path
+    from . import catchup as cu
+    logging.getLogger("drishti").setLevel(logging.ERROR)     # holiday 404s are expected; real failures are in the report below
+    prof = None
+    try:
+        from .profile import load_profile
+        prof = load_profile(cfg)
+    except Exception:
+        prof = None
+    try:
+        with cu.lock(cfg.db_path.parent / "catchup.lock"):
+            rep = cu.run(st, budget_min=args.budget_min, private=args.private_dir, eval_dir=Path(args.eval_dir), profile=prof, only=args.slot, plan=args.plan,
+                         progress=lambda m: print(m, flush=True))
+    except cu.Locked as e:
+        print(f"drishti catchup: another catch-up is already running ({e}); nothing to do", file=sys.stderr)
+        return 0
+    except KeyError:
+        print(f"drishti catchup: unknown slot {args.slot!r}; one of {', '.join(s.name for s in cu.SLOTS)}", file=sys.stderr)
+        return 2
+    for s_ in rep.slots:
+        print(s_.line())
+    return 0 if rep.ok else 1
+
+
+def _holdings(st, args) -> int:
+    import json as _json
+    from pathlib import Path
+    from .portfolio import holdings as hd
+    if args.what in ("import", "txns"):
+        if not args.file:
+            print(f"drishti holdings {args.what}: give the CSV file", file=sys.stderr)
+            return 2
+        r = (hd.import_snapshot_csv if args.what == "import" else hd.import_txn_csv)(st, Path(args.file))
+        if not r.ok:
+            print(f"{r.error.kind}: {r.error.detail}", file=sys.stderr)
+            return 1
+        print(f"imported {r.data['imported']} row(s)" + (f" as of {', '.join(r.data['as_of'])}" if r.data.get("as_of") else ""))
+        for x in r.data["rejected"][:20]:
+            print(f"  rejected line {x['line']}: {x['why']}")
+        return 0 if not r.data["rejected"] else 1
+    if args.what == "summary":
+        s = hd.summary(st)
+        print(f"holdings as of {s['as_of'] or '-'}")
+        for h in s["holdings"]:
+            pnl = f"{h['pnl']:>12,.0f} ({h['pnl_pct']:+.1f}%)" if h.get("pnl") is not None else f"{'at cost':>12s}"
+            print(f"  {(h['symbol'] or h['isin']):<12s} {h['kind']:<5s} {h['quantity']:>9g} @ {h['avg_cost']:>9,.2f}  cost {h['cost']:>11,.0f}  value {h['value'] if h['value'] is not None else '-':>11}  {pnl}  txns {h['txns']}")
+        t = s["totals"]
+        if t:
+            print(f"priced: cost {t['cost_priced']:,.0f}  value {t['value_priced']:,.0f}  profit {t['pnl_priced']:,.0f} ({t['pnl_priced_pct']}%)  | all cost {t['cost_all']:,.0f}  | unpriced: {', '.join(t['unpriced']) or '-'}")
+        print(f"XIRR: {s['xirr'] if s['xirr'] is not None else 'not available'}  ({s['xirr_note']})")
+        return 0
+    print("drishti holdings: use one of import, txns, summary", file=sys.stderr)
     return 2
 
 
