@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("what")
     dp.add_argument("--query", default=None, help="company: ISIN, NSE symbol, BSE symbol or scrip code")
     dp.add_argument("--refresh", action="store_true", help="fundamentals: fetch again even if a recent copy is stored")
-    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-breakdown | history-coverage")
+    dc = sub.add_parser("decisions", help="decision log and the rules-vs-agents test: cases | rules | export | import | list | score | compare | audit | forward | history | history-report | history-breakdown | history-coverage | signal-study | portfolio-sim")
     dc.add_argument("what")
     dc.add_argument("--gate", default=None)
     dc.add_argument("--start", default=None)
@@ -72,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     dc.add_argument("--critiques", default=None, help="audit: critiques JSON-lines file")
     dc.add_argument("--a", default=None, help="compare/audit: first author, agent/model")
     dc.add_argument("--b", default=None, help="compare: second author; audit: the revised author (optional)")
+    dc.add_argument("--max-positions", type=int, default=5, help="portfolio-sim: most stocks held per sleeve")
     evp = sub.add_parser("evidence", help="evidence layer checks: audit (re-prove every stored quote) | sample (claims to check by eye) | summary (review score)")
     evp.add_argument("what")
     evp.add_argument("--n", type=int, default=20)
@@ -320,12 +321,33 @@ def _decisions(st, args, cfg) -> int:
         from .decisions import history as hs
         print(_json.dumps(hs.coverage(st), indent=1))
         return 0
+    if w == "signal-study":
+        from .decisions import study
+        out = Path(args.out or "eval/study")
+        r = study.run(st, cases_path=Path(args.cases or "eval/history/cases.json"), out_dir=out, since=args.start, until=args.end,
+                      progress=study._stderr)
+        summary = {k: r[k] for k in ("rows", "cases", "dates", "first", "last", "not_scored", "readings_tested", "expected_false_stable_by_chance", "stable", "written_to")
+                   if k in r}
+        print(_json.dumps(summary if "error" not in r else r, indent=1))
+        return 0 if "error" not in r else 1
+    if w == "portfolio-sim":
+        from .decisions import portfolio, study
+        out = Path(args.out or "eval/study")
+        rows_path = out / "rows.jsonl"
+        if not rows_path.exists():
+            print(f"drishti decisions portfolio-sim: {rows_path} not found; run `drishti decisions signal-study` first", file=sys.stderr)
+            return 2
+        rows = [r for r in study.load_rows(rows_path) if (not args.start or r["as_of"] >= args.start) and (not args.end or r["as_of"] <= args.end)]
+        r = portfolio.run(rows, every=args.every, max_positions=args.max_positions)
+        (out / "portfolio.json").write_text(_json.dumps(r, indent=1), encoding="utf-8")
+        print(_json.dumps(r, indent=1))
+        return 0
     if w == "history":
         from .decisions import history as hs
         r = hs.run(st, out=Path(args.cases or "eval/history/cases.json"), start=args.start, end=args.end, every=args.every, n_stocks=args.n_stocks, seed=args.seed)
         print(_json.dumps(r, indent=1))
         return 0 if r["done"] else 1
-    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-breakdown history-coverage", file=sys.stderr)
+    print(f"drishti decisions: unknown action {w!r}; one of cases rules export import list score compare audit forward history history-report history-breakdown history-coverage signal-study portfolio-sim", file=sys.stderr)
     return 2
 
 
