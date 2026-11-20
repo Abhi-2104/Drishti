@@ -3,7 +3,7 @@
 # that was off simply catches up at the next trigger.
 #   powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1            # register / update
 #   powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1 -Remove    # remove it (and any old per-job tasks)
-# Triggers: at logon (2 min delay, for the network), daily 08:30, daily 20:30, Saturday 10:00. A missed start runs as soon as
+# It runs hidden (no terminal window). Triggers: at logon (2 min delay, for the network), daily 08:30, daily 20:30, Saturday 10:00. A missed start runs as soon as
 # possible (StartWhenAvailable); it only runs with a network; a second copy never starts while one runs (IgnoreNew; catchup also
 # holds a lock file); 2 hour limit. The task runs while you are logged on. Times are the laptop's clock, so keep it on IST.
 param([switch]$Remove)
@@ -21,8 +21,11 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     if ($Remove) { Write-Host "removed  $taskName"; exit 0 }
 } elseif ($Remove) { Write-Host "nothing to remove"; exit 0 }
 
-$uv = (Get-Command uv -ErrorAction Stop).Source
-$action = New-ScheduledTaskAction -Execute $uv -Argument "run drishti catchup" -WorkingDirectory $proj
+# pythonw.exe from the project's own environment: no console window ever opens. Output goes to logs\catchup-<date>.log next to the
+# database (see `uv run drishti paths`) and the result of every slot is in the job log (`uv run drishti health`), which the app shows.
+$pyw = Join-Path $proj ".venv\Scripts\pythonw.exe"
+if (-not (Test-Path $pyw)) { Write-Error "$pyw not found: run 'uv sync' in $proj first"; exit 1 }
+$action = New-ScheduledTaskAction -Execute $pyw -Argument "-m drishti.cli catchup --log" -WorkingDirectory $proj
 
 $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $logon.Delay = "PT2M"
@@ -34,7 +37,7 @@ $set = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailab
     -ExecutionTimeLimit (New-TimeSpan -Hours 2) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logon, $morning, $evening, $weekly) -Settings $set `
-    -Description "drishti catchup: runs every Drishti slot that is due and not yet done (morning, evening, weekly)" | Out-Null
+    -Description "drishti catchup (hidden): runs every Drishti slot that is due and not yet done (morning, evening, weekly)" | Out-Null
 Write-Host "registered $taskName  (logon, 08:30, 20:30, Sat 10:00)"
-Write-Host "Try it now:  Start-ScheduledTask -TaskName '$taskName'   then   uv run drishti health"
+Write-Host "Try it now:  Start-ScheduledTask -TaskName '$taskName'   (no window opens; watch the log or run  uv run drishti health)"
 Write-Host "Or see what is due without running anything:  uv run drishti catchup --plan"

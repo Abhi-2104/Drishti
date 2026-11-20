@@ -48,6 +48,7 @@ class Step:
     persist: Callable[[Store, Result], int] | None = None   # parsed rows -> typed table; returns rows written
     count: Callable[[Result], int | None] | None = None     # row count for the log when len(data) is not it
     daily: bool = False                                      # a dated file: compare as_of with the expected trading day
+    group: str = ""                                          # steps hitting one remote host share a circuit breaker
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,33 @@ class Job:
     when: str     # suggested IST time, shown by `drishti jobs` and used in the scheduling recipe
     doc: str
     steps: tuple[Step, ...]
+
+
+class Breaker:
+    """Stops hammering a host that is not answering. After TRIP_AFTER network failures in a row (timeouts or dropped
+    connections) for one group, the rest of that group is skipped, logged as failed so the slot retries later, until
+    a step in the group succeeds. State lives for one process, so a manual `drishti run` always tries afresh."""
+    TRIP_AFTER = 2
+
+    def __init__(self) -> None:
+        self.fails: dict[str, int] = {}
+
+    def tripped(self, group: str) -> bool:
+        return bool(group) and self.fails.get(group, 0) >= self.TRIP_AFTER
+
+    def record(self, group: str, error: DrishtiError | None) -> None:
+        if not group:
+            return
+        if error is None:
+            self.fails[group] = 0
+        elif error.kind in (ErrorKind.NETWORK, ErrorKind.TIMEOUT):
+            self.fails[group] = self.fails.get(group, 0) + 1
+
+    def reset(self) -> None:
+        self.fails.clear()
+
+
+BREAKER = Breaker()
 
 
 @dataclass
@@ -155,7 +183,7 @@ def _p(fn):
 
 
 def _fred(sid: str) -> Step:
-    return Step(f"fred_{sid}", lambda s, t: fred.fred_series(sid, store=s, today=t), count=lambda r: r.data["n_total"])
+    return Step(f"fred_{sid}", lambda s, t: fred.fred_series(sid, store=s, today=t), count=lambda r: r.data["n_total"], group="fred")
 
 
 def _yahoo(sym: str) -> Step:
@@ -294,7 +322,9 @@ def expected_trading_day(now: datetime, store: Store | None = None) -> date:
     return d
 
 
-def run_job(store: Store, name: str, *, now: datetime | None = None, sleep: Callable[[float], None] = time.sleep) -> JobReport:
+def run_job(store: Store, name: str, *, now: datetime | None = None, sleep: Callable[[float], None] = time.sleep,
+            breaker: Breaker | None = None) -> JobReport:
+    breaker = BREAKER if breaker is None else breaker
     if name not in JOBS:
         raise KeyError(name)
     now = now or datetime.now(IST)
@@ -303,7 +333,10 @@ def run_job(store: Store, name: str, *, now: datetime | None = None, sleep: Call
     for step in JOBS[name].steps:
         t0 = time.time()
         try:
-            res = step.run(store, today)
+            if breaker.tripped(step.group):
+                res = Result(error=DrishtiError(ErrorKind.NETWORK, f"skipped: {step.group} failed {Breaker.TRIP_AFTER} times in a row this run; retried next run"))
+            else:
+                res = step.run(store, today)
         except DrishtiError as e:     # providers return errors in Results, but a helper may still raise one
             res = Result(error=e)
         except Exception as e:  # noqa: BLE001 - a bug in one step must not stop the others, and must still be logged typed
@@ -324,6 +357,8 @@ def run_job(store: Store, name: str, *, now: datetime | None = None, sleep: Call
         if res.ok and step.daily and res.as_of and date.fromisoformat(res.as_of) < exp:
             known = ds.is_holiday(store, exp.isoformat()) is not None
             note = f"newest available is {res.as_of}; expected {exp} " + ("(not published yet)" if known else "(not published yet, or a holiday: run `drishti run calendars`)")
+        if not (res.error and str(res.error.detail).startswith("skipped:")):
+            breaker.record(step.group, res.error)
         store.log_result(name, res, dataset=step.dataset, trade_date=res.as_of, rows=rows)
         store.record_canary(f"{name}.{step.dataset}", ok=res.ok, newest=res.as_of, error=res.error)
         report.steps.append(StepReport(step.dataset, res.ok, res.as_of, rows, time.time() - t0,

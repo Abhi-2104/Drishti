@@ -46,11 +46,14 @@ cd $HOME\Documents\Drishti\v2
 powershell -ExecutionPolicy Bypass -File scripts\register-tasks.ps1
 ```
 
-`-Remove` takes it out again. Triggers: at logon (2 minute delay), daily 08:30, daily 20:30, Saturday 10:00. A missed start runs
+The task runs the project's own `.venv\Scripts\pythonw.exe -m drishti.cli catchup --log`, so **no terminal window opens**. Its output
+goes to `logs\catchup-<date>.log` next to the database (the newest 30 are kept; `uv run drishti paths` shows the folder), and
+every slot's result is in the job log (`uv run drishti health`), which is what the app's Data & Jobs page will show. Run `uv sync`
+first so `.venv` exists; run it again after an update. `-Remove` takes the task out again. Triggers: at logon (2 minute delay), daily 08:30, daily 20:30, Saturday 10:00. A missed start runs
 as soon as possible, it needs a network, a second copy never starts while one runs, and it stops after 2 hours. It runs while
 you are logged on; keep the laptop's clock on IST. Try it with `Start-ScheduledTask -TaskName "Drishti catchup"`, then
 `uv run drishti health`. A test pins the slot table to `drishti jobs`, so a new job cannot be forgotten, and pins the script to
-`drishti catchup` and its four triggers.
+`drishti catchup`, the hidden `pythonw` launch and its four triggers.
 
 ## Linux / WSL (cron)
 

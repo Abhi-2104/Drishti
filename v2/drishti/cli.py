@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .config import ConfigError, write_templates
@@ -22,6 +23,9 @@ def _todo(what: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for name in ("stdout", "stderr"):        # started by pythonw (no console): there is no stream, and print() would crash
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
     ap = argparse.ArgumentParser(prog="drishti", description="Drishti investor copilot")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("mcp", help="run the stdio MCP server")
@@ -36,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     cu.add_argument("--budget-min", type=float, default=100.0, help="start no new job after this many minutes; unfinished slots stay due")
     cu.add_argument("--private-dir", default=None, help="folder with holdings.csv and weekly packs (default: $DRISHTI_PRIVATE, ../private, ./private)")
     cu.add_argument("--eval-dir", default="eval", help="folder for the forward log (default: eval)")
+    cu.add_argument("--log", action="store_true", help="write the output to the log file (logs/catchup-<date>.log next to the database) instead of the terminal; "
+                    "what the scheduled task does, since it runs without a console")
     hd = sub.add_parser("holdings", help="holdings in the database: import <holdings.csv> | txns <transactions.csv> | summary")
     hd.add_argument("what")
     hd.add_argument("file", nargs="?", default=None)
@@ -107,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"profile  : {cfg.profile_path}")
             print(f"signals  : {cfg.signal_settings_path}")
             print(f"database : {cfg.db_path}")
+            print(f"logs     : {cfg.db_path.parent / 'logs'}")
         except ConfigError as e:
             print(f"drishti {args.cmd}: {e}", file=sys.stderr)
             return 2
@@ -416,7 +423,36 @@ def _decisions(st, args, cfg) -> int:
     return 2
 
 
+LOG_KEEP = 30
+
+
+def _log_to_file(cfg):
+    """Send stdout and stderr to logs/catchup-<date>.log next to the database; returns what to restore. Keeps the newest LOG_KEEP logs."""
+    from datetime import datetime
+    d = cfg.db_path.parent / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    f = open(d / f"catchup-{datetime.now().date().isoformat()}.log", "a", encoding="utf-8", buffering=1)
+    f.write(f"\n=== {datetime.now().isoformat(timespec='seconds')} drishti catchup ===\n")
+    for old in sorted(d.glob("catchup-*.log"))[:-LOG_KEEP]:
+        old.unlink(missing_ok=True)
+    saved = (sys.stdout, sys.stderr)
+    sys.stdout = sys.stderr = f
+    return saved, f
+
+
 def _catchup(st, args, cfg) -> int:
+    saved = None
+    if args.log or sys.__stdout__ is None:          # no console (pythonw, i.e. the scheduled task), or asked for
+        saved, logf = _log_to_file(cfg)
+    try:
+        return _catchup_run(st, args, cfg)
+    finally:
+        if saved:
+            sys.stdout, sys.stderr = saved
+            logf.close()
+
+
+def _catchup_run(st, args, cfg) -> int:
     import logging
     from pathlib import Path
     from . import catchup as cu
